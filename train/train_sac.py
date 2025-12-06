@@ -5,10 +5,32 @@ Train SAC - SAC训练主脚本
 
 import os
 import sys
+
+# ==================== CUDA 环境设置 ====================
+# 必须在 import torch 之前设置，避免 CUDA initialization error
+if 'CUDA_VISIBLE_DEVICES' not in os.environ:
+    # 如果没有设置，默认使用第一块 GPU
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+
 import time
 import numpy as np
 import torch
 from datetime import datetime
+
+# 检查 CUDA 环境
+print("="*60)
+print("环境检查")
+print("="*60)
+print(f"PyTorch 版本: {torch.__version__}")
+print(f"CUDA 可用: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"CUDA 版本: {torch.version.cuda}")
+    print(f"GPU 数量: {torch.cuda.device_count()}")
+    for i in range(torch.cuda.device_count()):
+        print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+else:
+    print("⚠️  CUDA 不可用，将使用 CPU 训练（非常慢）")
+print()
 
 # 导入自定义模块
 from config import (
@@ -43,6 +65,9 @@ class SACTrainer:
         self.replay_buffer = ReplayBuffer(capacity=SAC_CONFIG['replay_buffer_size'])
         self.opponent_pool = OpponentPool()
         self.env = PoolEnv()
+        
+        # 训练时禁用噪声，让 SAC 学习精确策略
+        self.env.enable_noise = False
         
         # 训练状态
         self.global_episode = 0
@@ -140,6 +165,7 @@ class SACTrainer:
         """预热阶段：使用随机策略填充 replay buffer"""
         print("\n" + "-" * 60)
         print(f"预热阶段：随机策略填充 buffer 到 {SAC_CONFIG['warmup_steps']} 个 transitions")
+        print(f"   环境噪声: {'启用' if self.env.enable_noise else '禁用'}")
         print("-" * 60)
         
         while len(self.replay_buffer) < SAC_CONFIG['warmup_steps']:
@@ -163,7 +189,7 @@ class SACTrainer:
                     # 执行动作
                     from config import denormalize_action
                     action_dict = denormalize_action(action)
-                    shot_result = self.env.take_shot(**action_dict)
+                    shot_result = self.env.take_shot(action_dict)
                     
                     # 计算奖励
                     my_balls_before = count_remaining_balls(
@@ -188,7 +214,7 @@ class SACTrainer:
                 else:  # 对手
                     balls, my_type, table = self.env.get_observation()
                     action_dict = opponent.decision(balls, my_type, table)
-                    self.env.take_shot(**action_dict)
+                    self.env.take_shot(action_dict)
                     done = self.env.get_done()[0]
             
             if len(self.replay_buffer) % 1000 == 0:
@@ -235,7 +261,7 @@ class SACTrainer:
                 # 执行动作
                 from config import denormalize_action
                 action_dict = denormalize_action(action)
-                shot_result = self.env.take_shot(**action_dict)
+                shot_result = self.env.take_shot(action_dict)
                 
                 # 计算奖励
                 game_done, info = self.env.get_done()
@@ -264,7 +290,7 @@ class SACTrainer:
             else:  # 对手回合
                 balls, my_type, table = self.env.get_observation()
                 action_dict = opponent.decision(balls, my_type, table)
-                shot_result = self.env.take_shot(**action_dict)
+                shot_result = self.env.take_shot(action_dict)
                 
                 # 检查对手是否失误，追溯防守奖励
                 if shot_result.get('WHITE_BALL_INTO_POCKET') or \
@@ -337,11 +363,11 @@ class SACTrainer:
                     if current_player == 'A':
                         balls, my_type, table = self.env.get_observation()
                         action_dict = self.sac_wrapper.decision(balls, my_type, table)
-                        self.env.take_shot(**action_dict)
+                        self.env.take_shot(action_dict)
                     else:
                         balls, my_type, table = self.env.get_observation()
                         action_dict = opponent.decision(balls, my_type, table)
-                        self.env.take_shot(**action_dict)
+                        self.env.take_shot(action_dict)
                     
                     done = self.env.get_done()[0]
                 
