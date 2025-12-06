@@ -6,7 +6,8 @@ Opponent Pool - 对手池管理
 import copy
 import random
 import os
-from agent import BasicAgent, NewAgent  # 导入现有的 agents
+from agent import BasicAgent  # 导入 BasicAgent
+from external_agents import PhysicsAgent, MCTSAgent  # 导入外部 agents
 
 
 class OpponentPool:
@@ -19,46 +20,41 @@ class OpponentPool:
     3. 管理 self-play checkpoints
     """
     
-    def __init__(self, mcts_agent_path=None):
+    def __init__(self, enable_mcts=True):
         """
         Args:
-            mcts_agent_path: str, MCTS Agent 的路径（可选）
+            enable_mcts: bool, 是否启用 MCTS Agent（需要安装 bayesian-optimization）
         """
         # 固定对手
         self.basic_agent = BasicAgent()
-        self.physics_agent = NewAgent()  # 物理模拟 agent
+        self.physics_agent = PhysicsAgent()  # 物理模拟 agent
         self.mcts_agent = None
         
-        # 尝试加载 MCTS Agent
-        if mcts_agent_path:
-            self.mcts_agent = self._load_mcts_agent(mcts_agent_path)
+        # 尝试初始化 MCTS Agent
+        if enable_mcts:
+            self.mcts_agent = self._init_mcts_agent()
         
         # Self-play checkpoint 池
         self.checkpoint_pool = []
         self.max_checkpoints = 20
     
-    def _load_mcts_agent(self, path):
+    def _init_mcts_agent(self):
         """
-        加载 MCTS Agent（需要适配具体实现）
-        
-        Args:
-            path: str, MCTS agent 文件路径
+        初始化 MCTS Agent
         
         Returns:
             MCTS Agent instance or None
         """
         try:
-            # 这里需要根据实际的 MCTS 实现来导入
-            # 示例：
-            # import sys
-            # sys.path.append(path)
-            # from mcts_agent import MCTSAgent
-            # return MCTSAgent()
-            
-            print(f"⚠️  MCTS Agent 加载功能未实现，路径: {path}")
+            mcts_agent = MCTSAgent(num_simulations=120, num_candidates=20, max_depth=2)
+            print("✅ MCTS Agent 初始化成功")
+            return mcts_agent
+        except ImportError as e:
+            print(f"⚠️  MCTS Agent 不可用: {e}")
+            print(f"   提示: 运行 'pip install bayesian-optimization' 来启用 MCTS Agent")
             return None
         except Exception as e:
-            print(f"⚠️  无法加载 MCTS Agent: {e}")
+            print(f"⚠️  MCTS Agent 初始化失败: {e}")
             return None
     
     def get_opponent(self, opponent_type):
