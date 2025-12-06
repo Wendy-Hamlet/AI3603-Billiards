@@ -149,13 +149,15 @@ class Agent():
 class BasicAgent(Agent):
     """基于贝叶斯优化的智能 Agent"""
     
-    def __init__(self, target_balls=None):
+    def __init__(self, target_balls=None, verbose=False):
         """初始化 Agent
         
         参数：
             target_balls: 保留参数，暂未使用
+            verbose: 是否打印详细信息
         """
         super().__init__()
+        self.verbose = verbose
         
         # 搜索空间
         self.pbounds = {
@@ -166,9 +168,9 @@ class BasicAgent(Agent):
             'b': (-0.5, 0.5)
         }
         
-        # 优化参数
-        self.INITIAL_SEARCH = 20
-        self.OPT_SEARCH = 10
+        # 优化参数（训练时加速）
+        self.INITIAL_SEARCH = 10  # 从 20 减少到 10
+        self.OPT_SEARCH = 5       # 从 10 减少到 5
         self.ALPHA = 1e-2
         
         # 模拟噪声（可调整以改变训练难度）
@@ -181,7 +183,8 @@ class BasicAgent(Agent):
         }
         self.enable_noise = False
         
-        print("BasicAgent (Smart, pooltool-native) 已初始化。")
+        if self.verbose:
+            print("BasicAgent (Smart, pooltool-native) 已初始化。")
 
     
     def _create_optimizer(self, reward_function, seed):
@@ -241,7 +244,8 @@ class BasicAgent(Agent):
             remaining_own = [bid for bid in my_targets if balls[bid].state.s != 4]
             if len(remaining_own) == 0:
                 my_targets = ["8"]
-                print("[BasicAgent] 我的目标球已全部清空，自动切换目标为：8号球")
+                if self.verbose:
+                    print("[BasicAgent] 我的目标球已全部清空，自动切换目标为：8号球")
 
             # 1.动态创建“奖励函数” (Wrapper)
             # 贝叶斯优化器会调用此函数，并传入参数
@@ -287,7 +291,8 @@ class BasicAgent(Agent):
 
                 return score
 
-            print(f"[BasicAgent] 正在为 Player (targets: {my_targets}) 搜索最佳击球...")
+            if self.verbose:
+                print(f"[BasicAgent] 正在为 Player (targets: {my_targets}) 搜索最佳击球...")
             
             seed = np.random.randint(1e6)
             optimizer = self._create_optimizer(reward_fn_wrapper, seed)
@@ -301,7 +306,8 @@ class BasicAgent(Agent):
             best_score = best_result['target']
 
             if best_score < 10:
-                print(f"[BasicAgent] 未找到好的方案 (最高分: {best_score:.2f})。使用随机动作。")
+                if self.verbose:
+                    print(f"[BasicAgent] 未找到好的方案 (最高分: {best_score:.2f})。使用随机动作。")
                 return self._random_action()
             action = {
                 'V0': float(best_params['V0']),
@@ -311,15 +317,17 @@ class BasicAgent(Agent):
                 'b': float(best_params['b']),
             }
 
-            print(f"[BasicAgent] 决策 (得分: {best_score:.2f}): "
-                  f"V0={action['V0']:.2f}, phi={action['phi']:.2f}, "
-                  f"θ={action['theta']:.2f}, a={action['a']:.3f}, b={action['b']:.3f}")
+            if self.verbose:
+                print(f"[BasicAgent] 决策 (得分: {best_score:.2f}): "
+                      f"V0={action['V0']:.2f}, phi={action['phi']:.2f}, "
+                      f"θ={action['theta']:.2f}, a={action['a']:.3f}, b={action['b']:.3f}")
             return action
 
         except Exception as e:
-            print(f"[BasicAgent] 决策时发生严重错误，使用随机动作。原因: {e}")
-            import traceback
-            traceback.print_exc()
+            if self.verbose:
+                print(f"[BasicAgent] 决策时发生严重错误，使用随机动作。原因: {e}")
+                import traceback
+                traceback.print_exc()
             return self._random_action()
 
 class NewAgent(Agent):

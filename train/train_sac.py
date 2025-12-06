@@ -64,7 +64,7 @@ class SACTrainer:
         self.sac_wrapper = SACAgentWrapper(self.sac_agent, self.state_encoder)
         self.replay_buffer = ReplayBuffer(capacity=SAC_CONFIG['replay_buffer_size'])
         self.opponent_pool = OpponentPool()
-        self.env = PoolEnv()
+        self.env = PoolEnv(verbose=False)  # 训练时禁用详细输出
         
         # 训练时禁用噪声，让 SAC 学习精确策略
         self.env.enable_noise = False
@@ -100,8 +100,15 @@ class SACTrainer:
         print("=" * 60)
         
         # 预热阶段：随机策略填充 buffer
+        # 注意：恢复训练时，buffer是空的，但可以直接开始训练（利用新数据填充）
         if len(self.replay_buffer) < SAC_CONFIG['warmup_steps']:
-            self._warmup()
+            if self.global_episode == 0:
+                # 全新训练：需要预热
+                self._warmup()
+            else:
+                # 恢复训练：提示需要收集数据，但可以边训练边收集
+                print(f"\n⚠️  Buffer 当前大小: {len(self.replay_buffer)}, 需要至少 {SAC_CONFIG['warmup_steps']} 条数据")
+                print(f"   将在训练过程中逐步填充 buffer\n")
         
         # 渐进式训练
         for stage_name, stage_config in TRAINING_STAGES.items():
@@ -111,11 +118,16 @@ class SACTrainer:
             self.current_stage = stage_name
             self.stage_episode = 0
             
-            print("\n" + "=" * 60)
-            print(f"阶段: {stage_config['name']}")
-            print(f"目标 Episodes: {stage_config['episodes']}")
-            print(f"对手分布: {stage_config['opponents']}")
-            print("=" * 60)
+            print("\n" + "=" * 80)
+            print(f"🎯 阶段 {stage_name}: {stage_config['name']}")
+            print("=" * 80)
+            print(f"  📈 目标 Episodes: {stage_config['episodes']}")
+            print(f"  🤖 对手分布: {stage_config['opponents']}")
+            if stage_config.get('target_metrics'):
+                print(f"  🏆 完成条件: {stage_config['target_metrics']}")
+            print("=" * 80)
+            print(f"{'Episode':>7} | {'Stage Progress':>18} | {'Reward':>23} | {'Steps':>7} | {'Result':>15}")
+            print("-" * 80)
             
             # 阶段训练循环
             while self.stage_episode < stage_config['episodes']:
@@ -166,11 +178,12 @@ class SACTrainer:
         print("\n" + "-" * 60)
         print(f"预热阶段：随机策略填充 buffer 到 {SAC_CONFIG['warmup_steps']} 个 transitions")
         print(f"   环境噪声: {'启用' if self.env.enable_noise else '禁用'}")
+        print(f"   对手: RandomAgent (快速随机)")
         print("-" * 60)
         
         while len(self.replay_buffer) < SAC_CONFIG['warmup_steps']:
-            # 随机对手
-            opponent = self.opponent_pool.get_opponent('basic')
+            # 使用快速随机对手
+            opponent = self.opponent_pool.get_opponent('random')
             
             # 玩一局游戏
             self.env.reset(target_ball='solid')
@@ -218,7 +231,8 @@ class SACTrainer:
                     done = self.env.get_done()[0]
             
             if len(self.replay_buffer) % 1000 == 0:
-                print(f"  Buffer size: {len(self.replay_buffer)}/{SAC_CONFIG['warmup_steps']}")
+                progress = (len(self.replay_buffer) / SAC_CONFIG['warmup_steps']) * 100
+                print(f"  📦 Buffer: {len(self.replay_buffer):5d}/{SAC_CONFIG['warmup_steps']} [{progress:5.1f}%]")
         
         print(f"✅ 预热完成，buffer size: {len(self.replay_buffer)}")
     
@@ -404,14 +418,47 @@ class SACTrainer:
     
     def _log_episode(self, episode_info):
         """记录 episode 信息"""
+        # 更新统计
+        self.episode_rewards.append(episode_info['reward'])
+        self.episode_lengths.append(episode_info['length'])
+        
+        # 每轮都显示简洁信息
         if self.global_episode % EVAL_CONFIG['log_frequency'] == 0:
+            # 计算最近100轮的平均奖励
+            recent_rewards = self.episode_rewards[-100:]
+            avg_reward = np.mean(recent_rewards) if recent_rewards else 0
+            
+            # 计算阶段进度百分比
+            current_stage_config = TRAINING_STAGES[self.current_stage]
+            stage_progress = (self.stage_episode / current_stage_config['episodes']) * 100
+            
+            # 简洁的单行输出
+            win_mark = "✓" if episode_info['won'] else "✗"
+            print(f"Ep {self.global_episode:5d} | Stage {self.current_stage} [{stage_progress:5.1f}%] | "
+                  f"Reward: {episode_info['reward']:7.2f} (avg100: {avg_reward:6.2f}) | "
+                  f"Steps: {episode_info['length']:2d} | {win_mark} vs {episode_info['opponent_type']:7s}")
+        
+        # 每N轮显示详细统计
+        if self.global_episode % EVAL_CONFIG.get('detailed_log_frequency', 100) == 0:
             stats = self.sac_agent.get_statistics()
-            print(f"\nEpisode {self.global_episode} (Stage: {self.current_stage}, {self.stage_episode})")
-            print(f"  Reward: {episode_info['reward']:.2f}")
-            print(f"  Length: {episode_info['length']}")
-            print(f"  Opponent: {episode_info['opponent_type']}")
-            print(f"  Alpha: {stats.get('alpha_mean', 0):.4f}")
-            print(f"  Buffer: {len(self.replay_buffer)}")
+            recent_rewards = self.episode_rewards[-100:]
+            print(f"\n{'='*80}")
+            print(f"📊 详细统计 (Episode {self.global_episode})")
+            print(f"{'='*80}")
+            print(f"  🎯 奖励统计:")
+            print(f"     - 最近100轮平均: {np.mean(recent_rewards):.2f}")
+            print(f"     - 最近100轮标准差: {np.std(recent_rewards):.2f}")
+            print(f"     - 最近100轮最大: {np.max(recent_rewards):.2f}")
+            print(f"     - 最近100轮最小: {np.min(recent_rewards):.2f}")
+            print(f"  🎮 训练参数:")
+            print(f"     - Alpha (温度): {stats.get('alpha_mean', 0):.4f}")
+            print(f"     - Buffer 大小: {len(self.replay_buffer)}")
+            print(f"  🏆 胜率统计:")
+            for opp_type in ['basic', 'physics', 'mcts']:
+                if self.game_counts[opp_type] > 0:
+                    winrate = self.win_counts[opp_type] / self.game_counts[opp_type] * 100
+                    print(f"     - vs {opp_type:7s}: {winrate:5.1f}% ({self.win_counts[opp_type]}/{self.game_counts[opp_type]})")
+            print(f"{'='*80}\n")
     
     def _log_evaluation(self, eval_results, final=False):
         """记录评估结果"""
@@ -425,12 +472,44 @@ class SACTrainer:
         filename = f"final_model.pth" if is_final else f"checkpoint_ep{self.global_episode}.pth"
         filepath = os.path.join(CHECKPOINT_CONFIG['save_dir'], filename)
         
+        # 保存模型参数
         self.sac_agent.save(filepath)
+        
+        # 保存训练状态（额外文件）
+        state_filepath = filepath.replace('.pth', '_state.pth')
+        training_state = {
+            'global_episode': self.global_episode,
+            'current_stage': self.current_stage,
+            'stage_episode': self.stage_episode,
+            'episode_rewards': self.episode_rewards,
+            'episode_lengths': self.episode_lengths,
+            'win_counts': self.win_counts,
+            'game_counts': self.game_counts,
+        }
+        torch.save(training_state, state_filepath)
+        
         print(f"💾 Checkpoint 已保存: {filepath}")
     
     def _load_checkpoint(self, filepath):
         """加载 checkpoint"""
+        # 加载模型参数
         self.sac_agent.load(filepath)
+        
+        # 加载训练状态
+        state_filepath = filepath.replace('.pth', '_state.pth')
+        if os.path.exists(state_filepath):
+            training_state = torch.load(state_filepath, map_location=DEVICE)
+            self.global_episode = training_state['global_episode']
+            self.current_stage = training_state['current_stage']
+            self.stage_episode = training_state['stage_episode']
+            self.episode_rewards = training_state['episode_rewards']
+            self.episode_lengths = training_state['episode_lengths']
+            self.win_counts = training_state['win_counts']
+            self.game_counts = training_state['game_counts']
+            print(f"📋 训练状态已恢复: Episode {self.global_episode}, Stage {self.current_stage}")
+        else:
+            print(f"⚠️  未找到训练状态文件，从 Episode 0 开始")
+        
         print(f"📂 Checkpoint 已加载: {filepath}")
 
 

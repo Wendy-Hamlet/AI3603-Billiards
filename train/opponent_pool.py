@@ -6,8 +6,23 @@ Opponent Pool - 对手池管理
 import copy
 import random
 import os
+import numpy as np
 from agent import BasicAgent  # 导入 BasicAgent
 from external_agents import PhysicsAgent, MCTSAgent  # 导入外部 agents
+
+
+class RandomAgent:
+    """快速随机 Agent - 用于预热阶段，比 BasicAgent 快 100 倍"""
+    
+    def decision(self, balls=None, my_targets=None, table=None):
+        """返回随机动作"""
+        return {
+            'V0': np.random.uniform(0.5, 3.0),  # 低速，更容易控制
+            'phi': np.random.uniform(0, 360),
+            'theta': np.random.uniform(0, 30),  # 低仰角
+            'a': np.random.uniform(-0.2, 0.2),
+            'b': np.random.uniform(-0.2, 0.2)
+        }
 
 
 class OpponentPool:
@@ -25,8 +40,11 @@ class OpponentPool:
         Args:
             enable_mcts: bool, 是否启用 MCTS Agent（需要安装 bayesian-optimization）
         """
-        # 固定对手
-        self.basic_agent = BasicAgent()
+        # 快速对手（用于预热）
+        self.random_agent = RandomAgent()
+        
+        # 固定对手（训练时禁用详细输出）
+        self.basic_agent = BasicAgent(verbose=False)
         self.physics_agent = PhysicsAgent()  # 物理模拟 agent
         self.mcts_agent = None
         
@@ -62,12 +80,14 @@ class OpponentPool:
         获取指定类型的对手
         
         Args:
-            opponent_type: str, 'basic', 'physics', 'mcts', or 'self'
+            opponent_type: str, 'random', 'basic', 'physics', 'mcts' 之一
         
         Returns:
-            opponent agent
+            Agent 实例
         """
-        if opponent_type == 'basic':
+        if opponent_type == 'random':
+            return self.random_agent
+        elif opponent_type == 'basic':
             return self.basic_agent
         elif opponent_type == 'physics':
             return self.physics_agent

@@ -33,7 +33,7 @@ SAC_CONFIG = {
     # 训练参数
     'batch_size': 512,        # A100 可用更大 batch
     'gradient_steps': 1,      # 每步环境交互后的梯度更新次数
-    'warmup_steps': 10000,    # 随机策略预热步数
+    'warmup_steps': 5000,     # 随机策略预热步数（从10000减少，加速启动）
     
     # 经验回放
     'replay_buffer_size': 500000,
@@ -132,7 +132,8 @@ EVAL_CONFIG = {
     'eval_frequency': 1000,    # 每 N episodes 评估一次
     'eval_games': 40,          # 每次评估的对局数（保证统计显著性）
     'checkpoint_frequency': 5000,  # 每 N episodes 保存 checkpoint
-    'log_frequency': 100,      # 每 N episodes 记录日志
+    'log_frequency': 1,        # 每 N episodes 记录日志（1=每轮都显示）
+    'detailed_log_frequency': 100,  # 每 N episodes 显示详细统计
 }
 
 # ==================== Checkpoint 管理 ====================
