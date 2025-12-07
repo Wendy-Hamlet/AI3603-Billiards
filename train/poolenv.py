@@ -424,21 +424,21 @@ class PoolEnv():
                 if first_contact_ball_id != '8':
                     if (self.verbose): print(f"⚠️ Player {player} 己方球已清空但首次碰撞非黑8，交换球权。")
                     self.curr_player = 1 - self.curr_player
-                self.last_state = save_balls_state(self.balls)
-                self.hit_count += 1
-                if self.hit_count >= self.MAX_HIT_COUNT:
-                    if (self.verbose): print(f"⏰ 达到最大击球数，比赛结束！")
-                    self.done = True
-                    a_left = len([bid for bid in self.player_targets["A"] if bid != '8' and self.balls[bid].state.s != 4])
-                    b_left = len([bid for bid in self.player_targets["B"] if bid != '8' and self.balls[bid].state.s != 4])
-                    if a_left < b_left:
-                        self.winner = "A"
-                    elif b_left < a_left:
-                        self.winner = "B"
-                    else:
-                        self.winner = "SAME"
-                    if (self.verbose): print(f"📊 最大击球数详情：A剩余 {a_left}，B剩余 {b_left}，胜者：{self.winner}")
-                return {'ME_INTO_POCKET': own_pocketed, 'ENEMY_INTO_POCKET': enemy_pocketed, 'WHITE_BALL_INTO_POCKET': False, 'BLACK_BALL_INTO_POCKET': False, 'FOUL_FIRST_HIT': True, 'NO_POCKET_NO_RAIL': False, 'BALLS': copy.deepcopy(self.balls)}
+                    self.last_state = save_balls_state(self.balls)
+                    self.hit_count += 1
+                    if self.hit_count >= self.MAX_HIT_COUNT:
+                        if (self.verbose): print(f"⏰ 达到最大击球数，比赛结束！")
+                        self.done = True
+                        a_left = len([bid for bid in self.player_targets["A"] if bid != '8' and self.balls[bid].state.s != 4])
+                        b_left = len([bid for bid in self.player_targets["B"] if bid != '8' and self.balls[bid].state.s != 4])
+                        if a_left < b_left:
+                            self.winner = "A"
+                        elif b_left < a_left:
+                            self.winner = "B"
+                        else:
+                            self.winner = "SAME"
+                        if (self.verbose): print(f"📊 最大击球数详情：A剩余 {a_left}，B剩余 {b_left}，胜者：{self.winner}")
+                    return {'ME_INTO_POCKET': own_pocketed, 'ENEMY_INTO_POCKET': enemy_pocketed, 'WHITE_BALL_INTO_POCKET': False, 'BLACK_BALL_INTO_POCKET': False, 'FOUL_FIRST_HIT': True, 'NO_POCKET_NO_RAIL': False, 'BALLS': copy.deepcopy(self.balls)}
 
         # 修复：无进球时必须母球和目标球至少一个碰库
         if len(new_pocketed) == 0 and (not cue_hit_cushion) and (not target_hit_cushion):
@@ -949,21 +949,21 @@ class PoolEnv():
                 if first_contact_ball_id != '8':
                     if (self.verbose): print(f"⚠️ Player {player} 己方球已清空但首次碰撞非黑8，交换球权。")
                     self.curr_player = 1 - self.curr_player
-                self.last_state = save_balls_state(self.balls)
-                self.hit_count += 1
-                if self.hit_count >= self.MAX_HIT_COUNT:
-                    if (self.verbose): print(f"⏰ 达到最大击球数，比赛结束！")
-                    self.done = True
-                    a_left = len([bid for bid in self.player_targets["A"] if bid != '8' and self.balls[bid].state.s != 4])
-                    b_left = len([bid for bid in self.player_targets["B"] if bid != '8' and self.balls[bid].state.s != 4])
-                    if a_left < b_left:
-                        self.winner = "A"
-                    elif b_left < a_left:
-                        self.winner = "B"
-                    else:
-                        self.winner = "SAME"
-                    if (self.verbose): print(f"📊 最大击球数详情：A剩余 {a_left}，B剩余 {b_left}，胜者：{self.winner}")
-                return {'ME_INTO_POCKET': own_pocketed, 'ENEMY_INTO_POCKET': enemy_pocketed, 'WHITE_BALL_INTO_POCKET': False, 'BLACK_BALL_INTO_POCKET': False, 'FOUL_FIRST_HIT': True, 'NO_POCKET_NO_RAIL': False, 'BALLS': copy.deepcopy(self.balls)}
+                    self.last_state = save_balls_state(self.balls)
+                    self.hit_count += 1
+                    if self.hit_count >= self.MAX_HIT_COUNT:
+                        if (self.verbose): print(f"⏰ 达到最大击球数，比赛结束！")
+                        self.done = True
+                        a_left = len([bid for bid in self.player_targets["A"] if bid != '8' and self.balls[bid].state.s != 4])
+                        b_left = len([bid for bid in self.player_targets["B"] if bid != '8' and self.balls[bid].state.s != 4])
+                        if a_left < b_left:
+                            self.winner = "A"
+                        elif b_left < a_left:
+                            self.winner = "B"
+                        else:
+                            self.winner = "SAME"
+                        if (self.verbose): print(f"📊 最大击球数详情：A剩余 {a_left}，B剩余 {b_left}，胜者：{self.winner}")
+                    return {'ME_INTO_POCKET': own_pocketed, 'ENEMY_INTO_POCKET': enemy_pocketed, 'WHITE_BALL_INTO_POCKET': False, 'BLACK_BALL_INTO_POCKET': False, 'FOUL_FIRST_HIT': True, 'NO_POCKET_NO_RAIL': False, 'BALLS': copy.deepcopy(self.balls)}
 
         # 修复：无进球时必须母球和目标球至少一个碰库
         if len(new_pocketed) == 0 and (not cue_hit_cushion) and (not target_hit_cushion):
