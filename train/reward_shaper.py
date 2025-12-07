@@ -38,12 +38,14 @@ class RewardShaper:
         }
         
         # 终局奖励
-        self.win_reward = self.config['win_reward']
-        self.loss_reward = self.config['loss_reward']
+        self.win_reward = self.config['win_reward']  # 主动胜利
+        self.win_passive = self.config.get('win_passive', 30.0)  # 被动胜利
+        self.loss_reward = self.config['loss_reward']  # 主动失败  
+        self.loss_passive = self.config.get('loss_passive', -30.0)  # 被动失败
         self.lose_turn = self.config['lose_turn']
     
     def calculate_immediate_reward(self, shot_result, my_balls_before, enemy_balls_before, 
-                                   game_done=False, i_won=None):
+                                   game_done=False, i_won=None, win_reason=None):
         """
         计算即时奖励（不包含防守奖励）
         
@@ -51,6 +53,7 @@ class RewardShaper:
             shot_result: dict, 包含击球结果信息
                 - ME_INTO_POCKET: list, 我方进球
                 - ENEMY_INTO_POCKET: list, 对方进球
+                - BLACK_BALL_INTO_POCKET: bool, 黑八是否进袋
                 - WHITE_BALL_INTO_POCKET: bool
                 - FOUL_FIRST_HIT: bool
                 - NO_POCKET_NO_RAIL: bool
@@ -59,6 +62,7 @@ class RewardShaper:
             enemy_balls_before: int, 击球前对方剩余球数
             game_done: bool, 游戏是否结束
             i_won: bool or None, 如果游戏结束，我是否获胜（True/False/None）
+            win_reason: str, 胜利原因 ('active' 打进黑八 / 'passive' 对手失误)
         
         Returns:
             float: 即时奖励
@@ -68,9 +72,17 @@ class RewardShaper:
         # 1. 终局奖励（最高优先级）
         if game_done:
             if i_won is True:
-                return self.win_reward
+                # 区分主动胜利和被动胜利
+                if win_reason == 'active':  # 打进黑八
+                    return self.win_reward
+                else:  # 对手失误导致胜利
+                    return self.win_passive
             elif i_won is False:
-                return self.loss_reward
+                # 区分主动失败和被动失败
+                if win_reason == 'active':  # 自己失误导致输球
+                    return self.loss_reward
+                else:  # 对手打进黑八
+                    return self.loss_passive
             else:  # 平局或超时
                 return 0.0
         

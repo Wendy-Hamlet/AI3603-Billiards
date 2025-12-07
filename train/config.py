@@ -93,8 +93,10 @@ REWARD_CONFIG = {
     'foul_no_hit': -25.0,
     
     # 终局奖励
-    'win_reward': 1000.0,
-    'loss_reward': -1000.0,
+    'win_reward': 100.0,           # 主动胜利（打进黑八）
+    'win_passive': 30.0,           # 被动胜利（对手失误）
+    'loss_reward': -100.0,         # 主动失败（自己失误）
+    'loss_passive': -30.0,         # 被动失败（对手打进黑八）
     
     # 失去球权惩罚（未进己方球）
     'lose_turn': -5.0,
@@ -150,6 +152,8 @@ CHECKPOINT_CONFIG = {
 # ==================== 日志配置 ====================
 LOG_CONFIG = {
     'log_dir': './train/logs/sac',
+    'log_frequency': 1,          # 每 N 个 episode 记录一次
+    'detailed_log_frequency': 100,  # 每 N 个 episode 打印详细统计
     'tensorboard': True,       # 是否使用 TensorBoard
     'console_log_level': 'INFO',
     'metrics_to_log': [

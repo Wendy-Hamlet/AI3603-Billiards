@@ -7,6 +7,7 @@ import copy
 import random
 import os
 import numpy as np
+import torch
 from agent import BasicAgent  # 导入 BasicAgent
 from external_agents import PhysicsAgent, MCTSAgent  # 导入外部 agents
 
@@ -35,11 +36,14 @@ class OpponentPool:
     3. 管理 self-play checkpoints
     """
     
-    def __init__(self, enable_mcts=True):
+    def __init__(self, enable_mcts=True, verbose=True):
         """
         Args:
             enable_mcts: bool, 是否启用 MCTS Agent（需要安装 bayesian-optimization）
+            verbose: bool, 是否打印初始化信息（worker 进程应设为 False）
         """
+        self.verbose = verbose
+        
         # 快速对手（用于预热）
         self.random_agent = RandomAgent()
         
@@ -55,6 +59,10 @@ class OpponentPool:
         # Self-play checkpoint 池
         self.checkpoint_pool = []
         self.max_checkpoints = 20
+        
+        # 缓存最近使用的 checkpoint agent，避免重复创建
+        self._cached_checkpoint_agent = None
+        self._cached_checkpoint_episode = None
     
     def _init_mcts_agent(self):
         """
@@ -65,14 +73,17 @@ class OpponentPool:
         """
         try:
             mcts_agent = MCTSAgent(num_simulations=120, num_candidates=20, max_depth=2)
-            print("✅ MCTS Agent 初始化成功")
+            if self.verbose:
+                print("✅ MCTS Agent 初始化成功")
             return mcts_agent
         except ImportError as e:
-            print(f"⚠️  MCTS Agent 不可用: {e}")
-            print(f"   提示: 运行 'pip install bayesian-optimization' 来启用 MCTS Agent")
+            if self.verbose:
+                print(f"⚠️  MCTS Agent 不可用: {e}")
+                print(f"   提示: 运行 'pip install bayesian-optimization' 来启用 MCTS Agent")
             return None
         except Exception as e:
-            print(f"⚠️  MCTS Agent 初始化失败: {e}")
+            if self.verbose:
+                print(f"⚠️  MCTS Agent 初始化失败: {e}")
             return None
     
     def get_opponent(self, opponent_type):
@@ -93,7 +104,8 @@ class OpponentPool:
             return self.physics_agent
         elif opponent_type == 'mcts':
             if self.mcts_agent is None:
-                print("⚠️  MCTS Agent 不可用，使用 Physics Agent 代替")
+                if self.verbose:
+                    print("⚠️  MCTS Agent 不可用，使用 Physics Agent 代替")
                 return self.physics_agent
             return self.mcts_agent
         elif opponent_type == 'self':
@@ -116,6 +128,11 @@ class OpponentPool:
         weights = list(opponents.values())
         
         opponent_type = random.choices(opponent_types, weights=weights)[0]
+        
+        # Debug: 如果采样到 self 但池为空，打印警告
+        if opponent_type == 'self' and len(self.checkpoint_pool) == 0 and self.verbose:
+            print(f"⚠️  采样到 self-play 但 checkpoint 池为空（池大小: {len(self.checkpoint_pool)}）")
+        
         return self.get_opponent(opponent_type)
     
     def add_checkpoint(self, sac_agent_wrapper, episode, metrics):
@@ -127,9 +144,15 @@ class OpponentPool:
             episode: int
             metrics: dict, 评估指标
         """
+        # 保存模型状态字典而不是 deepcopy 对象
+        # 这样可以避免 PyTorch 的 deepcopy 问题
         checkpoint = {
             'episode': episode,
-            'agent': copy.deepcopy(sac_agent_wrapper),
+            'state_dict': {
+                'actor': sac_agent_wrapper.sac_agent.actor.state_dict(),
+                'critic': sac_agent_wrapper.sac_agent.critic.state_dict(),
+            },
+            'state_encoder': sac_agent_wrapper.state_encoder,  # StateEncoder 是无状态的，可以共享
             'metrics': metrics
         }
         
@@ -139,7 +162,8 @@ class OpponentPool:
         if len(self.checkpoint_pool) > self.max_checkpoints:
             self.checkpoint_pool.pop(0)  # 移除最旧的
         
-        print(f"✅ Checkpoint 添加成功 (episode {episode}), 池大小: {len(self.checkpoint_pool)}")
+        if self.verbose:
+            print(f"✅ Checkpoint 添加成功 (episode {episode}), 池大小: {len(self.checkpoint_pool)}")
     
     def sample_checkpoint(self):
         """
@@ -151,15 +175,41 @@ class OpponentPool:
             opponent agent or None
         """
         if len(self.checkpoint_pool) == 0:
-            print("⚠️  Checkpoint 池为空，使用 BasicAgent")
+            if self.verbose:
+                print("⚠️  Checkpoint 池为空，使用 BasicAgent")
             return self.basic_agent
         
-        # 70% 选择最新（通常是最强的）
+        # 选择一个 checkpoint（70% 最新，30% 随机历史）
         if random.random() < 0.7:
-            return self.checkpoint_pool[-1]['agent']
+            checkpoint = self.checkpoint_pool[-1]
         else:
-            # 30% 随机选择历史 checkpoint
-            return random.choice(self.checkpoint_pool)['agent']
+            checkpoint = random.choice(self.checkpoint_pool)
+        
+        # 使用缓存避免重复创建相同的 agent
+        if (self._cached_checkpoint_agent is not None and 
+            self._cached_checkpoint_episode == checkpoint['episode']):
+            return self._cached_checkpoint_agent
+        
+        # 从 state_dict 创建新的 agent wrapper
+        from sac_agent import SACAgent, SACAgentWrapper
+        
+        # 创建新的 SAC agent 并加载权重
+        agent = SACAgent()
+        agent.actor.load_state_dict(checkpoint['state_dict']['actor'])
+        agent.critic.load_state_dict(checkpoint['state_dict']['critic'])
+        
+        # 设置为评估模式
+        agent.actor.eval()
+        agent.critic.eval()
+        
+        # 创建 wrapper
+        wrapper = SACAgentWrapper(agent, checkpoint['state_encoder'])
+        
+        # 缓存
+        self._cached_checkpoint_agent = wrapper
+        self._cached_checkpoint_episode = checkpoint['episode']
+        
+        return wrapper
     
     def get_available_opponents(self):
         """
