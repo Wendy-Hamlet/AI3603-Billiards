@@ -130,6 +130,52 @@ class ReplayBuffer:
         self.position = 0
         self.pending_defense_reward_indices.clear()
     
+    def save(self, filepath):
+        """
+        保存 replay buffer 到文件
+        
+        Args:
+            filepath: str, 保存路径
+        """
+        import pickle
+        buffer_data = {
+            'buffer': list(self.buffer),
+            'position': self.position,
+            'capacity': self.capacity,
+            'pending_defense_reward_indices': self.pending_defense_reward_indices
+        }
+        with open(filepath, 'wb') as f:
+            pickle.dump(buffer_data, f)
+    
+    def load(self, filepath):
+        """
+        从文件加载 replay buffer
+        
+        Args:
+            filepath: str, 加载路径
+        """
+        import pickle
+        import os
+        
+        if not os.path.exists(filepath):
+            print(f"⚠️  Buffer 文件不存在: {filepath}")
+            return False
+        
+        try:
+            with open(filepath, 'rb') as f:
+                buffer_data = pickle.load(f)
+            
+            self.buffer = deque(buffer_data['buffer'], maxlen=buffer_data['capacity'])
+            self.position = buffer_data['position']
+            self.capacity = buffer_data['capacity']
+            self.pending_defense_reward_indices = buffer_data['pending_defense_reward_indices']
+            
+            print(f"✅ Buffer 已加载: {len(self.buffer)} transitions")
+            return True
+        except Exception as e:
+            print(f"❌ Buffer 加载失败: {e}")
+            return False
+    
     def get_statistics(self):
         """获取 buffer 统计信息（用于调试）"""
         if len(self.buffer) == 0:

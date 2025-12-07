@@ -488,7 +488,12 @@ class SACTrainer:
         }
         torch.save(training_state, state_filepath)
         
+        # 保存 replay buffer
+        buffer_filepath = filepath.replace('.pth', '_buffer.pkl')
+        self.replay_buffer.save(buffer_filepath)
+        
         print(f"💾 Checkpoint 已保存: {filepath}")
+        print(f"💾 Buffer 已保存: {len(self.replay_buffer)} transitions")
     
     def _load_checkpoint(self, filepath):
         """加载 checkpoint"""
@@ -509,6 +514,10 @@ class SACTrainer:
             print(f"📋 训练状态已恢复: Episode {self.global_episode}, Stage {self.current_stage}")
         else:
             print(f"⚠️  未找到训练状态文件，从 Episode 0 开始")
+        
+        # 加载 replay buffer
+        buffer_filepath = filepath.replace('.pth', '_buffer.pkl')
+        self.replay_buffer.load(buffer_filepath)
         
         print(f"📂 Checkpoint 已加载: {filepath}")
 

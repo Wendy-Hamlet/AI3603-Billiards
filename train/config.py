@@ -35,6 +35,10 @@ SAC_CONFIG = {
     'gradient_steps': 1,      # 每步环境交互后的梯度更新次数
     'warmup_steps': 5000,     # 随机策略预热步数（从10000减少，加速启动）
     
+    # 并行训练
+    'num_parallel_envs': 16,  # 并行环境数量（同时进行的对局数）
+    'update_frequency': 16,   # 每收集N个episodes后更新一次网络
+    
     # 经验回放
     'replay_buffer_size': 500000,
     
@@ -64,11 +68,11 @@ def denormalize_action(action):
         dict: {'V0': float, 'phi': float, 'theta': float, 'a': float, 'b': float}
     """
     return {
-        'V0': ACTION_SPACE['V0']['bias'] + ACTION_SPACE['V0']['scale'] * action[0],
-        'phi': ACTION_SPACE['phi']['bias'] + ACTION_SPACE['phi']['scale'] * action[1],
-        'theta': ACTION_SPACE['theta']['bias'] + ACTION_SPACE['theta']['scale'] * action[2],
-        'a': ACTION_SPACE['a']['bias'] + ACTION_SPACE['a']['scale'] * action[3],
-        'b': ACTION_SPACE['b']['bias'] + ACTION_SPACE['b']['scale'] * action[4],
+        'V0': float(ACTION_SPACE['V0']['bias'] + ACTION_SPACE['V0']['scale'] * action[0]),
+        'phi': float(ACTION_SPACE['phi']['bias'] + ACTION_SPACE['phi']['scale'] * action[1]),
+        'theta': float(ACTION_SPACE['theta']['bias'] + ACTION_SPACE['theta']['scale'] * action[2]),
+        'a': float(ACTION_SPACE['a']['bias'] + ACTION_SPACE['a']['scale'] * action[3]),
+        'b': float(ACTION_SPACE['b']['bias'] + ACTION_SPACE['b']['scale'] * action[4]),
     }
 
 # ==================== 奖励函数配置 ====================
@@ -101,29 +105,29 @@ TRAINING_STAGES = {
     'stage1': {
         'name': 'Foundation',
         'episodes': 15000,
-        'opponents': {'basic': 1.0},
+        'opponents': {'self': 0.7, 'basic': 0.3},  # 70%自对弈，30%BasicAgent（减少CPU负载）
         'target_metrics': {
             'basic_winrate': 0.70
         },
-        'description': '学习基础击球和避免犯规'
+        'description': '自对弈为主，学习基础击球和避免犯规'
     },
     'stage2': {
         'name': 'Intermediate',
         'episodes': 25000,
-        'opponents': {'basic': 0.6, 'physics': 0.3, 'self': 0.1},
+        'opponents': {'self': 0.6, 'basic': 0.2, 'physics': 0.2},  # 提高自对弈比例
         'target_metrics': {
             'physics_winrate': 0.40
         },
-        'description': '学习对抗稳定对手和基础策略'
+        'description': '自对弈为主，逐步引入PhysicsAgent'
     },
     'stage3': {
         'name': 'Advanced',
         'episodes': 30000,
-        'opponents': {'basic': 0.2, 'physics': 0.3, 'mcts': 0.2, 'self': 0.3},
+        'opponents': {'self': 0.7, 'mcts': 0.3},  # 高比例自对弈，减少MCTS负载
         'target_metrics': {
             'mcts_winrate': 0.30
         },
-        'description': '挑战顶级对手和自我进化'
+        'description': '自对弈为主，挑战MCTS顶级对手'
     }
 }
 
