@@ -227,8 +227,9 @@ class ActionSpace:
         for i, param in enumerate(self.param_order):
             low, high = self.ranges[param]
             # [-1, 1] -> [0, 1] -> [low, high]
-            normalized_value = (action[i] + 1) * 0.5
-            result[param] = low + normalized_value * (high - low)
+            # 确保转换为 Python 原生 float (float64)，避免 numba 类型错误
+            normalized_value = (float(action[i]) + 1) * 0.5
+            result[param] = float(low + normalized_value * (high - low))
         return result
     
     def to_normalized(self, action_dict: Dict[str, float]) -> np.ndarray:

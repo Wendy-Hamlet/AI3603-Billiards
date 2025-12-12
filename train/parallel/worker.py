@@ -140,7 +140,8 @@ def run_game(env, actor, action_space) -> List[Dict]:
         with torch.no_grad():
             state_tensor = torch.FloatTensor(state).unsqueeze(0)
             action = actor.get_action(state_tensor, deterministic=False)
-            action = action.numpy().flatten()
+            # 确保转换为 float64，避免 numba 类型错误
+            action = action.numpy().astype(np.float64).flatten()
         
         # 裁剪动作
         action = action_space.clip_action(action)
