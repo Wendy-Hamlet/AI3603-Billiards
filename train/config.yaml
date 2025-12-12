@@ -7,8 +7,8 @@ training:
   defense_reward_enabled: false  # 后期可启用
   
   # 并行设置
-  num_workers: 64              # 使用64个CPU核心
-  games_per_batch: 64          # 每批64局游戏
+  num_workers: 64              # 使用64个CPU核心（可通过 --workers 覆盖）
+  games_per_batch: 64          # 每批游戏数（会自动根据worker数调整）
   learning_batch_size: 128     # 等待128局经验后学习（2批）
   
   # 经验回放

@@ -167,7 +167,11 @@ class SelfPlayTrainer:
         
         # 训练参数
         self.num_workers = config['training']['num_workers']
-        self.games_per_batch = config['training']['games_per_batch']
+        # games_per_batch 自动根据 worker 数调整，至少为 worker 数
+        self.games_per_batch = max(config['training']['games_per_batch'], self.num_workers)
+        # 如果 worker 数较少，减少每批游戏数加快迭代
+        if self.num_workers <= 4:
+            self.games_per_batch = self.num_workers * 2
         self.total_episodes = config['training']['total_episodes']
         self.save_freq = config['training']['save_freq']
         self.eval_freq = config['training']['eval_freq']
