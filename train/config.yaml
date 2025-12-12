@@ -1,0 +1,107 @@
+# SAC Self-Play Training Configuration
+# =====================================
+
+training:
+  # 自对弈设置
+  self_play: true
+  defense_reward_enabled: false  # 后期可启用
+  
+  # 并行设置
+  num_workers: 64              # 使用64个CPU核心
+  games_per_batch: 64          # 每批64局游戏
+  learning_batch_size: 128     # 等待128局经验后学习（2批）
+  
+  # 经验回放
+  buffer_size: 500000          # 50万经验
+  batch_size: 2048             # GPU训练批量大小
+  min_buffer_size: 10000       # 开始学习前的最小经验数
+  
+  # SAC 超参数
+  lr_actor: 3.0e-4
+  lr_critic: 3.0e-4
+  lr_alpha: 3.0e-4             # 自动温度调节
+  gamma: 0.99                  # 折扣因子
+  tau: 0.005                   # 目标网络软更新系数
+  initial_alpha: 0.2           # 初始熵系数
+  target_entropy: null         # null表示自动计算 (-action_dim)
+  
+  # 训练控制
+  total_episodes: 500000
+  updates_per_batch: 8         # 每批经验后更新次数
+  save_freq: 5000              # 每5000 episode保存
+  eval_freq: 1000              # 每1000 episode评估
+  log_freq: 100                # 每100 episode日志
+  
+  # 随机种子
+  seed: 42
+
+network:
+  actor:
+    hidden_dims: [512, 512, 256]
+    activation: relu
+  critic:
+    hidden_dims: [512, 512, 256]
+    activation: relu
+
+# 状态编码
+state:
+  # 球编码: 位置(2) + 进袋标志(1) = 3维/球
+  # 己方7球 + 对方7球 + 白球 + 黑8 = 16球 × 3 = 48维
+  # 球袋位置: 6袋 × 2 = 12维
+  # 游戏信息: 己方剩余 + 对方剩余 + 击球数 + 球权 = 4维
+  # 总计: 48 + 12 + 4 = 64维
+  state_dim: 64
+  
+  # 对称编码: 己方球统一编码，对方球统一编码
+  symmetric_encoding: true
+
+# 动作空间
+action:
+  action_dim: 5
+  ranges:
+    V0: [0.5, 8.0]         # 初速度 m/s
+    phi: [0.0, 360.0]      # 水平角度
+    theta: [0.0, 45.0]     # 垂直角度（限制避免跳球）
+    a: [-0.4, 0.4]         # 横向偏移
+    b: [-0.4, 0.4]         # 纵向偏移
+
+# 奖励权重
+reward:
+  w_terminal: 1.0
+  w_pocket: 1.0
+  w_position: 0.3
+  w_foul: 1.0
+  w_defense: 0.0           # 初期关闭
+
+# 课程学习
+curriculum:
+  enabled: true
+  stages:
+    - name: "stage_1"
+      description: "简单环境：己方1球+对方1球+黑8"
+      own_balls: 1
+      enemy_balls: 1
+      episodes: 50000
+    - name: "stage_2"
+      description: "中等环境：己方3球+对方3球+黑8"
+      own_balls: 3
+      enemy_balls: 3
+      episodes: 100000
+    - name: "stage_3"
+      description: "较难环境：己方5球+对方5球+黑8"
+      own_balls: 5
+      enemy_balls: 5
+      episodes: 150000
+    - name: "stage_4"
+      description: "完整环境：己方7球+对方7球+黑8"
+      own_balls: 7
+      enemy_balls: 7
+      episodes: 200000
+
+# 日志和保存
+logging:
+  log_dir: "logs/sac_selfplay"
+  save_dir: "checkpoints/sac_selfplay"
+  tensorboard: true
+  wandb: false              # 可选wandb日志
+
