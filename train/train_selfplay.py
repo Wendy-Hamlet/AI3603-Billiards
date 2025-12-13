@@ -117,9 +117,23 @@ class SelfPlayTrainer:
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
         
-        # 状态和动作维度
-        self.state_dim = config['state']['state_dim']
-        self.action_dim = config['action']['action_dim']
+        # 状态和动作配置
+        self.state_encoder_version = config['state'].get('encoder_version', 'v2')
+        self.action_space_type = config['action'].get('action_type', 'simple')
+        
+        # 根据配置动态确定维度
+        if self.state_encoder_version == 'v2':
+            self.state_dim = 84
+        else:
+            self.state_dim = 64
+        
+        if self.action_space_type == 'simple':
+            self.action_dim = 2
+        else:
+            self.action_dim = 5
+        
+        print(f"State encoder: {self.state_encoder_version} ({self.state_dim}D)")
+        print(f"Action space: {self.action_space_type} ({self.action_dim}D)")
         
         # 创建 SAC Agent
         self.agent = SACAgent(
@@ -136,12 +150,13 @@ class SelfPlayTrainer:
             device=self.device
         )
         
-        # 创建经验回放
+        # 创建经验回放（优先级缓冲区）
         self.replay_buffer = ReplayBuffer(
             state_dim=self.state_dim,
             action_dim=self.action_dim,
             buffer_size=config['training']['buffer_size'],
-            device=self.device
+            device=self.device,
+            priority_alpha=config['training'].get('priority_alpha', 0.6)
         )
         
         # 创建训练器
@@ -166,7 +181,8 @@ class SelfPlayTrainer:
             }])
         
         # 训练参数
-        self.num_workers = config['training']['num_workers']
+        # 限制最大 worker 数为 64
+        self.num_workers = min(config['training']['num_workers'], 64)
         # games_per_batch 自动根据 worker 数调整，至少为 worker 数
         self.games_per_batch = max(config['training']['games_per_batch'], self.num_workers)
         # 如果 worker 数较少，减少每批游戏数加快迭代
@@ -193,6 +209,18 @@ class SelfPlayTrainer:
         self.training_stats = []
         self.start_time = None
         
+        # 游戏统计
+        self.game_stats = {
+            'wins_a': 0,
+            'wins_b': 0,
+            'draws': 0,
+            'total_reward_a': 0.0,
+            'total_reward_b': 0.0,
+            'total_steps': 0,
+            'total_pockets_a': 0,
+            'total_pockets_b': 0
+        }
+        
         # Worker 管理器
         self.worker_manager = None
     
@@ -203,10 +231,13 @@ class SelfPlayTrainer:
         
         print(f"\n{'='*60}")
         print(f"Starting Self-Play Training")
-        print(f"  Workers: {self.num_workers}")
+        print(f"  Workers: {self.num_workers} (max CPUs: {os.environ.get('OMP_NUM_THREADS', 'unlimited')})")
         print(f"  Games per batch: {self.games_per_batch}")
         print(f"  Total episodes: {self.total_episodes}")
         print(f"  Device: {self.device}")
+        print(f"  Verbose: {self.config['training'].get('verbose', False)}")
+        curriculum_config = self.curriculum.get_current_config()
+        print(f"  Starting stage: {curriculum_config['stage_idx']+1} ({curriculum_config['stage_name']})")
         print(f"{'='*60}\n")
         
         try:
@@ -220,7 +251,10 @@ class SelfPlayTrainer:
                     'own_balls': curriculum_config['own_balls'],
                     'enemy_balls': curriculum_config['enemy_balls'],
                     'enable_noise': True,
-                    'hidden_dims': self.config['network']['actor']['hidden_dims']
+                    'hidden_dims': self.config['network']['actor']['hidden_dims'],
+                    'verbose': self.config['training'].get('verbose', False),
+                    'state_encoder_version': self.state_encoder_version,
+                    'action_space_type': self.action_space_type
                 }
                 
                 # 如果需要，重新创建 Worker
@@ -238,13 +272,17 @@ class SelfPlayTrainer:
                     self.worker_manager.broadcast_policy(policy_state)
                 
                 # 收集一批游戏经验
-                experiences = self.worker_manager.collect_experiences(
+                batch_start_time = time.time()
+                batch_result = self.worker_manager.collect_experiences(
                     target_games=self.games_per_batch,
-                    timeout=300.0
+                    timeout=600.0  # 10分钟超时
                 )
+                collect_time = time.time() - batch_start_time
+                
+                experiences = batch_result['experiences']
+                batch_stats = batch_result['stats']
                 
                 # 处理经验
-                batch_rewards = []
                 for exp in experiences:
                     self.replay_buffer.add(
                         state=exp['state'],
@@ -253,10 +291,18 @@ class SelfPlayTrainer:
                         next_state=exp['next_state'],
                         done=exp['done']
                     )
-                    batch_rewards.append(exp['reward'])
                 
                 total_games += self.games_per_batch
-                self.episode_rewards.extend(batch_rewards)
+                
+                # 累积统计
+                self.game_stats['wins_a'] += batch_stats['wins_a']
+                self.game_stats['wins_b'] += batch_stats['wins_b']
+                self.game_stats['draws'] += batch_stats['draws']
+                self.game_stats['total_reward_a'] += batch_stats['total_reward_a']
+                self.game_stats['total_reward_b'] += batch_stats['total_reward_b']
+                self.game_stats['total_steps'] += batch_stats['total_steps']
+                self.game_stats['total_pockets_a'] += batch_stats['total_pockets_a']
+                self.game_stats['total_pockets_b'] += batch_stats['total_pockets_b']
                 
                 # 更新课程
                 stage_changed = self.curriculum.step(self.games_per_batch)
@@ -267,16 +313,31 @@ class SelfPlayTrainer:
                     continue
                 
                 # 训练
+                train_stats = None
                 if self.trainer.can_train():
-                    stats = self.trainer.train_step()
-                    self.training_stats.append(stats)
+                    train_start_time = time.time()
+                    train_stats = self.trainer.train_step()
+                    train_time = time.time() - train_start_time
+                    self.training_stats.append(train_stats)
                     
                     # 广播新策略
                     policy_state = self.agent.get_policy_state_dict()
                     policy_state = {k: v.cpu() for k, v in policy_state.items()}
                     self.worker_manager.broadcast_policy(policy_state)
+                else:
+                    train_time = 0
                 
-                # 日志
+                # 每批次统一输出汇总
+                self._log_batch_summary(
+                    total_games, 
+                    len(experiences), 
+                    batch_stats,
+                    train_stats,
+                    collect_time,
+                    train_time
+                )
+                
+                # 详细日志（按频率）
                 if total_games % self.log_freq == 0:
                     self._log_progress(total_games)
                 
@@ -299,14 +360,63 @@ class SelfPlayTrainer:
         print(f"  Total games: {total_games}")
         print(f"  Total time: {(time.time() - self.start_time) / 3600:.2f} hours")
     
+    def _log_batch_summary(self, 
+                           total_games: int, 
+                           num_experiences: int,
+                           batch_stats: dict,
+                           train_stats: dict,
+                           collect_time: float,
+                           train_time: float):
+        """每批次训练后的统一汇总输出"""
+        # 计算本批次统计
+        games_in_batch = batch_stats['wins_a'] + batch_stats['wins_b'] + batch_stats['draws']
+        if games_in_batch > 0:
+            avg_reward_a = batch_stats['total_reward_a'] / games_in_batch
+            avg_reward_b = batch_stats['total_reward_b'] / games_in_batch
+            avg_steps = batch_stats['total_steps'] / games_in_batch
+            avg_pockets = (batch_stats['total_pockets_a'] + batch_stats['total_pockets_b']) / games_in_batch
+            draw_rate = batch_stats['draws'] / games_in_batch * 100
+            # A胜率 = A赢的场次 / 总场次（包括平局）
+            win_rate_a = batch_stats['wins_a'] / games_in_batch * 100
+            win_rate_b = batch_stats['wins_b'] / games_in_batch * 100
+        else:
+            avg_reward_a = avg_reward_b = avg_steps = avg_pockets = draw_rate = 0
+            win_rate_a = win_rate_b = 0
+        
+        # 构建输出
+        progress = self.curriculum.get_progress()
+        
+        # 单行紧凑输出
+        train_info = ""
+        if train_stats:
+            train_info = f"| CriticL: {train_stats.get('critic_loss', 0):.1f} ActorL: {train_stats.get('actor_loss', 0):.3f} α: {train_stats.get('alpha', 0):.3f}"
+        
+        # 显示：A胜/B胜/平局 百分比 | A/B平均奖励 | 平均进球 | 平均步数
+        print(f"[{total_games:>7,}] Stage {progress['stage']}/{progress['total_stages']} | "
+              f"A:{win_rate_a:>2.0f}% B:{win_rate_b:>2.0f}% D:{draw_rate:>2.0f}% | R_A: {avg_reward_a:>6.1f} R_B: {avg_reward_b:>6.1f} | "
+              f"Pkt: {avg_pockets:>4.1f} | Steps: {avg_steps:>4.0f} {train_info}")
+    
     def _log_progress(self, total_games: int):
-        """打印训练进度"""
+        """打印详细训练进度"""
         elapsed = time.time() - self.start_time
         games_per_sec = total_games / max(elapsed, 1)
         
-        # 计算最近的平均奖励
-        recent_rewards = self.episode_rewards[-1000:]
-        avg_reward = np.mean(recent_rewards) if recent_rewards else 0
+        # 计算累计统计
+        total_all_games = self.game_stats['wins_a'] + self.game_stats['wins_b'] + self.game_stats['draws']
+        if total_all_games > 0:
+            overall_win_rate_a = self.game_stats['wins_a'] / total_all_games * 100
+            overall_win_rate_b = self.game_stats['wins_b'] / total_all_games * 100
+            overall_draw_rate = self.game_stats['draws'] / total_all_games * 100
+        else:
+            overall_win_rate_a = overall_win_rate_b = overall_draw_rate = 0
+        
+        if total_games > 0:
+            avg_reward_a = self.game_stats['total_reward_a'] / total_games
+            avg_reward_b = self.game_stats['total_reward_b'] / total_games
+            avg_steps = self.game_stats['total_steps'] / total_games
+            avg_pockets = (self.game_stats['total_pockets_a'] + self.game_stats['total_pockets_b']) / total_games
+        else:
+            avg_reward_a = avg_reward_b = avg_steps = avg_pockets = 0
         
         # 训练统计
         if self.training_stats:
@@ -323,7 +433,8 @@ class SelfPlayTrainer:
         print(f"  Curriculum: Stage {progress['stage']}/{progress['total_stages']} ({progress['stage_name']})")
         print(f"  Stage Progress: {progress['stage_progress']*100:.1f}%")
         print(f"  Buffer Size: {len(self.replay_buffer):,}")
-        print(f"  Avg Reward: {avg_reward:.2f}")
+        print(f"  Win Stats: A={self.game_stats['wins_a']} B={self.game_stats['wins_b']} Draw={self.game_stats['draws']} (A:{overall_win_rate_a:.0f}% B:{overall_win_rate_b:.0f}% D:{overall_draw_rate:.0f}%)")
+        print(f"  Avg Reward: A={avg_reward_a:.2f} B={avg_reward_b:.2f} | Avg Pockets: {avg_pockets:.2f} | Avg Steps: {avg_steps:.1f}")
         print(f"  Critic Loss: {avg_critic_loss:.4f} | Actor Loss: {avg_actor_loss:.4f} | Alpha: {avg_alpha:.4f}")
     
     def _save_checkpoint(self, total_games: int, final: bool = False):
@@ -354,22 +465,71 @@ def main():
                         help='Path to checkpoint to resume from')
     parser.add_argument('--workers', type=int, default=None,
                         help='Override number of workers')
+    parser.add_argument('--cpus', type=int, default=64,
+                        help='Maximum number of CPU cores to use (default: 64)')
+    parser.add_argument('--stage', type=int, default=None,
+                        help='Start from specific curriculum stage (1-4)')
+    parser.add_argument('--verbose', action='store_true',
+                        help='Enable verbose game output')
     args = parser.parse_args()
+    
+    # 限制 CPU 核数 - 更全面的限制
+    max_cpus = min(args.cpus, 64)  # 最多64核
+    
+    # 设置各种线程库的限制
+    os.environ['OMP_NUM_THREADS'] = str(max_cpus)
+    os.environ['MKL_NUM_THREADS'] = str(max_cpus)
+    os.environ['OPENBLAS_NUM_THREADS'] = str(max_cpus)
+    os.environ['NUMEXPR_NUM_THREADS'] = str(max_cpus)
+    os.environ['VECLIB_MAXIMUM_THREADS'] = str(max_cpus)
+    
+    # 限制 numpy 线程（需要在导入 numpy 之前设置，但我们可以尝试）
+    try:
+        import threadpoolctl
+        threadpoolctl.threadpool_limits(limits=max_cpus)
+    except ImportError:
+        pass
+    
+    # PyTorch 线程限制
+    torch.set_num_threads(max_cpus)
+    torch.set_num_interop_threads(min(max_cpus, 4))
+    
+    # 设置 CPU 亲和性（只使用前 max_cpus 个核心）
+    try:
+        os.sched_setaffinity(0, set(range(max_cpus)))
+        print(f"CPU affinity set to cores 0-{max_cpus-1}")
+    except (AttributeError, OSError) as e:
+        print(f"Could not set CPU affinity: {e}")
     
     # 加载配置
     config = load_config(args.config)
     
     # 覆盖配置
     if args.workers is not None:
-        config['training']['num_workers'] = args.workers
+        # workers 数量不能超过 CPU 核数
+        config['training']['num_workers'] = min(args.workers, max_cpus)
+    else:
+        config['training']['num_workers'] = min(config['training']['num_workers'], max_cpus)
+    
+    # 添加 verbose 配置
+    config['training']['verbose'] = args.verbose
     
     # 创建训练器
     trainer = SelfPlayTrainer(config)
     
+    # 设置起始阶段
+    if args.stage is not None:
+        if 1 <= args.stage <= len(config['curriculum']['stages']):
+            trainer.curriculum.current_stage_idx = args.stage - 1
+            trainer.curriculum.episodes_in_stage = 0
+            print(f"Starting from stage {args.stage}: {config['curriculum']['stages'][args.stage-1]['name']}")
+        else:
+            print(f"Invalid stage {args.stage}, using stage 1")
+    
     # 恢复训练
     if args.resume is not None:
         trainer.agent.load(args.resume)
-        print(f"Resumed from {args.resume}")
+        print(f"Resumed model from {args.resume}")
     
     # 开始训练
     trainer.train()

@@ -54,12 +54,32 @@ python train/train_selfplay.py
 # 指定配置文件
 python train/train_selfplay.py --config train/config.yaml
 
-# 指定 Worker 数量
-python train/train_selfplay.py --workers 32
+# 指定 Worker 数量和 CPU 核数上限
+python train/train_selfplay.py --workers 32 --cpus 64
 
 # 从检查点恢复
 python train/train_selfplay.py --resume checkpoints/sac_selfplay/xxx/sac_ep10000.pt
+
+# 从特定阶段开始训练（1-4）
+python train/train_selfplay.py --stage 2
+
+# 结合恢复和阶段选择（从检查点恢复模型，从阶段3开始）
+python train/train_selfplay.py --resume checkpoints/xxx/sac_final.pt --stage 3
+
+# 启用详细游戏输出（调试用）
+python train/train_selfplay.py --verbose
 ```
+
+### 命令行参数
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--config` | 配置文件路径 | `train/config.yaml` |
+| `--resume` | 检查点路径（恢复模型权重） | None |
+| `--workers` | Worker 数量（覆盖配置） | 配置文件值 |
+| `--cpus` | CPU 核数上限 | 64 |
+| `--stage` | 起始课程阶段（1-4） | None（从头开始） |
+| `--verbose` | 启用详细游戏输出 | False |
 
 ### 配置说明
 
@@ -82,6 +102,32 @@ curriculum:
       enemy_balls: 1
       episodes: 50000
     # ... 更多阶段
+```
+
+### 分阶段训练
+
+课程学习分为 4 个阶段，逐步增加复杂度：
+
+| 阶段 | 己方球数 | 对方球数 | Episode 数 | 累计 |
+|------|---------|---------|-----------|------|
+| 1 | 1 | 1 | 50,000 | 50,000 |
+| 2 | 3 | 3 | 100,000 | 150,000 |
+| 3 | 5 | 5 | 150,000 | 300,000 |
+| 4 | 7 | 7 | 200,000 | 500,000 |
+
+可以使用 `--stage` 参数从任意阶段开始训练。结合 `--resume` 可以加载之前训练的模型继续训练。
+
+**示例：完整阶段训练流程**
+
+```bash
+# 第1阶段：完成后保存检查点
+python train/train_selfplay.py --cpus 64 --workers 64
+
+# 如果中断，从阶段2继续（加载模型）
+python train/train_selfplay.py --resume checkpoints/xxx/sac_epN.pt --stage 2
+
+# 评估阶段1模型后，直接跳到阶段4训练
+python train/train_selfplay.py --resume checkpoints/xxx/sac_final.pt --stage 4
 ```
 
 ## 奖励函数设计

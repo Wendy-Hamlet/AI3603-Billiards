@@ -4,7 +4,11 @@ pool_wrapper.py - 台球环境封装器
 将 PoolEnv 封装为适合 SAC 训练的接口：
 - 自对弈模式
 - 课程学习支持
-- 简化环境设置
+- 状态编码和动作空间可选
+
+支持的配置：
+- state_encoder: 'v1' (64维基础) 或 'v2' (84维增强)
+- action_space: 'full' (5维) 或 'simple' (2维)
 """
 
 import numpy as np
@@ -16,7 +20,11 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from poolenv import PoolEnv
-from train.environment.state_encoder import StateEncoder, ActionSpace
+import os
+from train.environment.state_encoder import (
+    StateEncoder, StateEncoderV2, 
+    ActionSpace, ActionSpaceSimple
+)
 
 import pooltool as pt
 
@@ -28,27 +36,42 @@ class PoolEnvWrapper:
     特点：
     - 自对弈模式：双方使用同一策略
     - 课程学习：可设置初始球数
-    - 统一的状态编码和动作解码
+    - 可选状态编码器和动作空间
     """
     
     def __init__(self,
                  own_balls: int = 7,
                  enemy_balls: int = 7,
-                 enable_noise: bool = True):
+                 enable_noise: bool = True,
+                 verbose: bool = False,
+                 state_encoder_version: str = 'v2',
+                 action_space_type: str = 'simple'):
         """
         Args:
             own_balls: 己方球数量（1-7）
             enemy_balls: 对方球数量（1-7）
             enable_noise: 是否启用动作噪声
+            verbose: 是否输出游戏过程
+            state_encoder_version: 'v1' (64维) 或 'v2' (84维增强)
+            action_space_type: 'full' (5维) 或 'simple' (2维)
         """
-        self.env = PoolEnv()
+        self.env = PoolEnv(verbose=verbose)
         self.env.enable_noise = enable_noise
         
         self.own_balls = own_balls
         self.enemy_balls = enemy_balls
         
-        self.state_encoder = StateEncoder()
-        self.action_space = ActionSpace()
+        # 选择状态编码器
+        if state_encoder_version == 'v2':
+            self.state_encoder = StateEncoderV2()
+        else:
+            self.state_encoder = StateEncoder()
+        
+        # 选择动作空间
+        if action_space_type == 'simple':
+            self.action_space = ActionSpaceSimple()
+        else:
+            self.action_space = ActionSpace()
         
         self.state_dim = self.state_encoder.get_state_dim()
         self.action_dim = self.action_space.get_action_dim()
@@ -221,17 +244,26 @@ class SelfPlayEnv:
     def __init__(self,
                  own_balls: int = 7,
                  enemy_balls: int = 7,
-                 enable_noise: bool = True):
+                 enable_noise: bool = True,
+                 verbose: bool = False,
+                 state_encoder_version: str = 'v2',
+                 action_space_type: str = 'simple'):
         """
         Args:
             own_balls: 初始己方球数
             enemy_balls: 初始对方球数
             enable_noise: 是否启用动作噪声
+            verbose: 是否输出游戏过程
+            state_encoder_version: 'v1' 或 'v2'
+            action_space_type: 'full' 或 'simple'
         """
         self.env = PoolEnvWrapper(
             own_balls=own_balls,
             enemy_balls=enemy_balls,
-            enable_noise=enable_noise
+            enable_noise=enable_noise,
+            verbose=verbose,
+            state_encoder_version=state_encoder_version,
+            action_space_type=action_space_type
         )
         
         self.state_dim = self.env.state_dim
@@ -244,6 +276,10 @@ class SelfPlayEnv:
         # 当前状态
         self.current_state = None
         self.current_player = None
+        
+        # 进球统计（不包括黑8）
+        self.pockets_a = 0  # A 打进自己球的数量
+        self.pockets_b = 0  # B 打进自己球的数量
     
     def reset(self, target_ball: str = None) -> tuple:
         """
@@ -264,6 +300,10 @@ class SelfPlayEnv:
         # 清空经验缓存
         self.player_a_experiences.clear()
         self.player_b_experiences.clear()
+        
+        # 重置进球统计
+        self.pockets_a = 0
+        self.pockets_b = 0
         
         return self.current_state, self.current_player
     
@@ -288,7 +328,7 @@ class SelfPlayEnv:
         done = info['done']
         winner = info['winner']
         
-        # 计算奖励
+        # 计算当前玩家的奖励（执行动作的玩家）
         reward_calc = RewardCalculator()
         reward, reward_details = reward_calc.compute_reward(
             shot_result=info['shot_result'],
@@ -300,10 +340,22 @@ class SelfPlayEnv:
             game_done=done,
             winner=winner,
             my_player=player_before,
-            is_my_shot=True
+            is_my_shot=True  # 当前玩家执行了这一杆
         )
         
-        # 记录经验
+        # 统计进球（不包括黑8）
+        shot_result = info['shot_result']
+        own_pocketed = shot_result.get('ME_INTO_POCKET', [])
+        # 不统计黑8
+        own_pocketed_no_8 = [b for b in own_pocketed if b != '8']
+        n_pocketed = len(own_pocketed_no_8)
+        
+        if player_before == 'A':
+            self.pockets_a += n_pocketed
+        else:
+            self.pockets_b += n_pocketed
+        
+        # 记录当前玩家的经验
         experience = {
             'state': state_before,
             'action': action,
@@ -318,6 +370,47 @@ class SelfPlayEnv:
         else:
             self.player_b_experiences.append(experience)
         
+        # 如果游戏结束，需要为对手也创建一个终局经验
+        # 对手没有执行动作，但需要知道游戏结束了以及他们的终局奖励
+        if done:
+            opponent = 'B' if player_before == 'A' else 'A'
+            
+            # 获取对手视角的目标球
+            if opponent == 'A':
+                opponent_targets = info['enemy_targets']  # 从当前玩家视角，enemy是对手
+                opponent_enemy_targets = info['my_targets']
+            else:
+                opponent_targets = info['enemy_targets']
+                opponent_enemy_targets = info['my_targets']
+            
+            # 计算对手的终局奖励（对手没有执行这一杆）
+            opponent_reward, opponent_reward_details = reward_calc.compute_reward(
+                shot_result=info['shot_result'],
+                balls_before=info['balls_before'],
+                balls_after=info['balls_after'],
+                my_targets=opponent_targets,
+                enemy_targets=opponent_enemy_targets,
+                table=self.env.get_table(),
+                game_done=done,
+                winner=winner,
+                my_player=opponent,
+                is_my_shot=False  # 对手没有执行这一杆
+            )
+            
+            # 对手的最后一个经验需要更新：
+            # - next_state 更新为游戏结束状态
+            # - done 设为 True
+            # - 添加终局奖励到原有奖励上
+            opponent_experiences = self.player_a_experiences if opponent == 'A' else self.player_b_experiences
+            if len(opponent_experiences) > 0:
+                last_exp = opponent_experiences[-1]
+                # 更新最后一个经验的 next_state 和 done
+                last_exp['next_state'] = next_state
+                last_exp['done'] = True
+                # 添加终局奖励
+                last_exp['reward'] += opponent_reward
+                last_exp['reward_details']['terminal'] = opponent_reward_details['terminal']
+        
         # 更新当前状态
         self.current_state = next_state
         if not done:
@@ -325,6 +418,7 @@ class SelfPlayEnv:
         
         info['reward'] = reward
         info['reward_details'] = reward_details
+        info['n_pocketed'] = n_pocketed
         
         return next_state, reward, done, info, self.current_player
     
@@ -347,7 +441,10 @@ class SelfPlayEnv:
 
 def create_env(own_balls: int = 7, 
                enemy_balls: int = 7,
-               enable_noise: bool = True) -> SelfPlayEnv:
+               enable_noise: bool = True,
+               verbose: bool = False,
+               state_encoder_version: str = 'v2',
+               action_space_type: str = 'simple') -> SelfPlayEnv:
     """
     创建自对弈环境的工厂函数
     
@@ -355,6 +452,9 @@ def create_env(own_balls: int = 7,
         own_balls: 己方球数
         enemy_balls: 对方球数
         enable_noise: 是否启用噪声
+        verbose: 是否输出游戏过程
+        state_encoder_version: 'v1' (64维) 或 'v2' (84维增强)
+        action_space_type: 'full' (5维) 或 'simple' (2维)
     
     Returns:
         SelfPlayEnv: 自对弈环境
@@ -362,6 +462,9 @@ def create_env(own_balls: int = 7,
     return SelfPlayEnv(
         own_balls=own_balls,
         enemy_balls=enemy_balls,
-        enable_noise=enable_noise
+        enable_noise=enable_noise,
+        verbose=verbose,
+        state_encoder_version=state_encoder_version,
+        action_space_type=action_space_type
     )
 

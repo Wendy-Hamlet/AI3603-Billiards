@@ -1,12 +1,15 @@
 """
 reward.py - 奖励计算器
 
-实现 SAC 训练的奖励函数，包含：
-- 终局奖励（区分主动/被动胜负）
-- 进球奖励（递增奖励 + 球权逻辑）
-- 走位奖励
-- 犯规惩罚
-- 防守奖励（可选）
+实现 SAC 训练的奖励函数，采用紧凑奖励范围设计：
+- 总奖励范围控制在 [-100, +100] 避免 Critic Loss 爆炸
+- 只在关键事件（进球、犯规、终局）给予奖励
+- 避免每步惩罚累积导致的负奖励主导
+
+奖励设计原则：
+1. 稀疏但有意义：不进球不惩罚，进球给奖励
+2. 终局奖励适中：胜利 +100，失败 -100
+3. 过程奖励辅助：进球、走位提供引导
 """
 
 import numpy as np
@@ -15,14 +18,15 @@ from typing import Dict, List, Optional, Tuple
 
 class RewardCalculator:
     """
-    SAC 奖励计算器
+    SAC 奖励计算器 - 紧凑范围版本
     
-    奖励组成：
-    - R_terminal: 终局奖励（胜/负/平）
-    - R_pocket: 进球奖励
-    - R_position: 走位奖励
-    - R_foul: 犯规惩罚
-    - R_defense: 防守奖励（可选）
+    奖励范围：[-100, +100]
+    
+    组成：
+    - R_terminal: 终局奖励 [±100]
+    - R_pocket: 进球奖励 [0, +30]
+    - R_position: 走位奖励 [-2, +5]
+    - R_foul: 犯规惩罚 [-15, 0]
     """
     
     def __init__(self,
@@ -67,19 +71,13 @@ class RewardCalculator:
                        my_player: str,
                        is_my_shot: bool = True) -> Tuple[float, Dict]:
         """
-        计算单步奖励
+        计算单步奖励（紧凑范围版本）
         
-        Args:
-            shot_result: take_shot() 的返回值
-            balls_before: 击球前的球状态
-            balls_after: 击球后的球状态
-            my_targets: 我方目标球列表
-            enemy_targets: 对方目标球列表
-            table: 球桌对象
-            game_done: 游戏是否结束
-            winner: 胜者 ('A', 'B', 'SAME')
-            my_player: 我方玩家标识 ('A' 或 'B')
-            is_my_shot: 这一杆是否是我方击球
+        设计原则：
+        - 不进球时无惩罚（避免累积负奖励）
+        - 进球时给予正奖励（引导学习）
+        - 犯规时给予适度惩罚（避免恶习）
+        - 终局奖励控制在 ±100
         
         Returns:
             Tuple[float, Dict]: (总奖励, 奖励详情)
@@ -87,33 +85,41 @@ class RewardCalculator:
         reward_details = {}
         total_reward = 0.0
         
-        # 计算击球前的剩余球数
+        # 计算球数信息
+        my_total_balls = len([bid for bid in my_targets if bid != '8'])
         my_remaining_before = sum(1 for bid in my_targets 
                                   if bid != '8' and balls_before[bid].state.s != 4)
         enemy_remaining_before = sum(1 for bid in enemy_targets 
                                      if balls_before[bid].state.s != 4)
         
-        # 1. 终局奖励
+        is_foul = self._is_foul(shot_result)
+        own_pocketed = shot_result.get('ME_INTO_POCKET', [])
+        
+        # 1. 终局奖励 [±100]
         r_terminal = self._compute_terminal_reward(
-            game_done, winner, my_player, is_my_shot, shot_result
+            game_done, winner, my_player, is_my_shot, shot_result,
+            my_remaining_before, my_total_balls
         )
         reward_details['terminal'] = r_terminal
         total_reward += self.w_terminal * r_terminal
         
-        # 如果游戏结束且是致命犯规，不再计算其他奖励
-        if game_done and r_terminal < -500:
+        # 如果游戏结束，直接返回终局奖励
+        if game_done:
+            reward_details['pocket'] = 0.0
+            reward_details['position'] = 0.0
+            reward_details['foul'] = 0.0
             reward_details['total'] = total_reward
             return total_reward, reward_details
         
-        # 2. 进球奖励
+        # 2. 进球奖励 [0, +30]（只有正奖励，无惩罚）
         r_pocket = self._compute_pocket_reward(
             shot_result, my_remaining_before, enemy_remaining_before
         )
         reward_details['pocket'] = r_pocket
         total_reward += self.w_pocket * r_pocket
         
-        # 3. 走位奖励（只有在没犯规且游戏未结束时计算）
-        if not game_done and not self._is_foul(shot_result):
+        # 3. 走位奖励 [-2, +5]（只在进球时给予，避免噪声）
+        if len(own_pocketed) > 0 and not is_foul:
             r_position = self._compute_position_reward(
                 balls_after, my_targets, table
             )
@@ -122,16 +128,10 @@ class RewardCalculator:
         else:
             reward_details['position'] = 0.0
         
-        # 4. 犯规惩罚（游戏未结束时的犯规）
-        if not game_done:
-            r_foul = self._compute_foul_penalty(shot_result)
-            reward_details['foul'] = r_foul
-            total_reward += self.w_foul * r_foul
-        else:
-            reward_details['foul'] = 0.0
-        
-        # 5. 防守奖励（需要下一步对手信息，这里预留）
-        reward_details['defense'] = 0.0
+        # 4. 犯规惩罚 [-15, 0]
+        r_foul = self._compute_foul_penalty(shot_result)
+        reward_details['foul'] = r_foul
+        total_reward += self.w_foul * r_foul
         
         reward_details['total'] = total_reward
         return total_reward, reward_details
@@ -141,15 +141,18 @@ class RewardCalculator:
                                   winner: Optional[str],
                                   my_player: str,
                                   is_my_shot: bool,
-                                  shot_result: Dict) -> float:
+                                  shot_result: Dict,
+                                  my_remaining_before: int = 7,
+                                  my_total_balls: int = 7) -> float:
         """
-        终局奖励
+        终局奖励（紧凑范围版本）
         
-        区分主动胜负和被动胜负：
-        - 我方正常获胜: +100
-        - 对方犯规导致我方获胜: 0 (不是我们的功劳)
-        - 我方犯规导致失败: -1000 (严厉惩罚)
-        - 对方正常获胜: -50 (适度惩罚)
+        范围控制在 [-100, +100]：
+        - 正常胜利（打进黑8）: +100
+        - 对方犯规获胜: +30（运气成分）
+        - 我方犯规失败: -100
+        - 对方正常获胜: -50
+        - 平局: -20 到 -80（根据进度动态调整）
         """
         if not game_done:
             return 0.0
@@ -158,20 +161,45 @@ class RewardCalculator:
         is_draw = (winner == 'SAME')
         
         if is_draw:
-            return 0.0
+            # 基于清台进度计算平局惩罚
+            if my_total_balls == 0:
+                # stage_0：只有黑八，平局 = 未打进黑八
+                return -80.0
+            
+            own_pocketed = my_total_balls - my_remaining_before
+            progress = own_pocketed / my_total_balls
+            
+            # 进度越高，平局惩罚越轻
+            if progress >= 1.0:
+                # 已清台只剩黑八，但没打进
+                return -60.0
+            elif progress >= 0.7:
+                return -30.0
+            elif progress >= 0.5:
+                return -40.0
+            elif progress >= 0.3:
+                return -50.0
+            else:
+                # 进度很低，严厉惩罚
+                return -80.0
         
         if i_won:
-            if is_my_shot:
-                # 我方击球导致获胜（正常清台打进黑8）
+            black_ball_pocketed = shot_result.get('BLACK_BALL_INTO_POCKET', False)
+            
+            if is_my_shot and black_ball_pocketed:
+                # 正常胜利：打进黑8
                 return 100.0
+            elif is_my_shot and not black_ball_pocketed:
+                # 超时胜利：运气成分
+                return 20.0
             else:
-                # 对方犯规导致我方获胜
-                return 0.0
+                # 对方犯规获胜
+                return 30.0
         else:
             # 我方输了
             if is_my_shot:
                 # 我方犯规导致失败
-                return -1000.0
+                return -100.0
             else:
                 # 对方正常获胜
                 return -50.0
@@ -181,51 +209,37 @@ class RewardCalculator:
                                 my_remaining_before: int,
                                 enemy_remaining_before: int) -> float:
         """
-        进球奖励
+        进球奖励（紧凑范围版本）
         
-        - 己方球：递增奖励（第k球得 5*k 分）
-        - 对方球：递减惩罚（第k球扣 5*k 分）
-        - 维持球权是核心目标
+        范围控制在 [0, +30]：
+        - 只有正奖励，无惩罚（帮对手进球由终局结果体现）
+        - 每球 +8，连续进球有小加成
+        - 清台最后几球价值更高
         """
         reward = 0.0
         
         own_pocketed = shot_result.get('ME_INTO_POCKET', [])
-        enemy_pocketed = shot_result.get('ENEMY_INTO_POCKET', [])
-        
         n_own = len(own_pocketed)
-        n_enemy = len(enemy_pocketed)
         
-        # === 己方进球奖励（递增） ===
-        # 第1球: 5分, 第2球: 10分, 第3球: 15分, ...
-        # 总分 = 5 * (1 + 2 + ... + n) = 5 * n * (n+1) / 2
-        own_reward = 5.0 * n_own * (n_own + 1) / 2
-        
-        # 清台进度加成：剩余球越少，每球价值越高
-        if n_own > 0 and my_remaining_before > 0:
-            for i in range(n_own):
-                remaining_at_this_ball = my_remaining_before - i
-                if remaining_at_this_ball > 0:
-                    progress_bonus = 10.0 / remaining_at_this_ball
-                    own_reward += progress_bonus
-        
-        reward += own_reward
-        
-        # === 对方球惩罚（递减） ===
-        enemy_penalty = -5.0 * n_enemy * (n_enemy + 1) / 2
-        
-        # === 球权维持逻辑 ===
         if n_own > 0:
-            # 维持球权奖励
-            reward += 8.0
+            # 1. 基础进球奖励：每球 +8
+            base_reward = 8.0 * n_own
             
-            # 如果同时帮对手进球，减少惩罚
-            if n_enemy > 0:
-                enemy_penalty *= 0.5
-                # 对手快清台时，帮他进球更严重
-                if enemy_remaining_before <= 2:
-                    enemy_penalty *= 1.5
-        
-        reward += enemy_penalty
+            # 2. 连续进球加成：+3 per extra ball
+            combo_bonus = 3.0 * max(0, n_own - 1)
+            
+            # 3. 清台进度加成：剩余球越少，奖励越高
+            progress_bonus = 0.0
+            for i in range(n_own):
+                remaining = my_remaining_before - i
+                if remaining > 0 and remaining <= 3:
+                    # 最后3球价值更高
+                    progress_bonus += 2.0 * (4 - remaining)
+            
+            reward = base_reward + combo_bonus + progress_bonus
+            
+            # 限制在合理范围
+            reward = min(reward, 30.0)
         
         return reward
     
@@ -234,15 +248,18 @@ class RewardCalculator:
                                   my_targets: List[str],
                                   table) -> float:
         """
-        走位奖励
+        走位奖励（紧凑范围版本）
         
-        评估击球后白球位置的击球质量
+        范围控制在 [-2, +5]：
+        - 只在进球后计算（减少噪声）
+        - 评估下一杆的击球质量
         """
         cue_pos = balls['cue'].state.rvw[0][:2]
         
-        # 获取还在台上的己方目标球
+        # 获取还在台上的己方目标球（不包括黑8）
         remaining = [bid for bid in my_targets 
                      if balls[bid].state.s != 4 and bid != '8']
+        
         if len(remaining) == 0:
             # 检查是否可以打黑8
             if balls['8'].state.s != 4:
@@ -265,16 +282,10 @@ class RewardCalculator:
         # 取最佳击球质量
         best_quality = max(shot_qualities)
         
-        # 考虑第二选择（鲁棒性）
-        if len(shot_qualities) >= 2:
-            sorted_q = sorted(shot_qualities, reverse=True)
-            second_quality = sorted_q[1]
-            if second_quality > 0.5:
-                best_quality += 0.1 * second_quality
-        
-        # 映射到奖励范围 [-5, +10]
-        reward = (best_quality - 0.3) * 20.0
-        reward = np.clip(reward, -5.0, 10.0)
+        # 映射到奖励范围 [-2, +5]
+        # quality 范围是 [0, 1]
+        reward = (best_quality - 0.3) * 10.0
+        reward = np.clip(reward, -2.0, 5.0)
         
         return reward
     
@@ -396,23 +407,30 @@ class RewardCalculator:
     
     def _compute_foul_penalty(self, shot_result: Dict) -> float:
         """
-        犯规惩罚（游戏未结束时的犯规）
+        犯规惩罚（紧凑范围版本）
+        
+        范围控制在 [-15, 0]：
+        - 白球进袋：-8
+        - 首先击中对方球：-5
+        - 无球进袋且无球触边：-3
+        - 空杆：-6
         """
         penalty = 0.0
         
         if shot_result.get('WHITE_BALL_INTO_POCKET', False):
-            penalty -= 25.0
+            penalty -= 8.0
         
         if shot_result.get('FOUL_FIRST_HIT', False):
-            penalty -= 15.0
+            penalty -= 5.0
         
         if shot_result.get('NO_POCKET_NO_RAIL', False):
-            penalty -= 12.0
+            penalty -= 3.0
         
         if shot_result.get('NO_HIT', False):
-            penalty -= 20.0
+            penalty -= 6.0
         
-        return penalty
+        # 限制最大惩罚
+        return max(penalty, -15.0)
     
     def _is_foul(self, shot_result: Dict) -> bool:
         """检查是否犯规"""
