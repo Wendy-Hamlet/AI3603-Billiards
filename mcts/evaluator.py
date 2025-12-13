@@ -2,6 +2,11 @@
 evaluator.py - 局面评估器
 
 评估台球局面的得分，用于MCTS的节点评估
+
+增强噪声鲁棒性：
+- 危险动作检测（可能误打黑八）
+- 安全边界评估
+- 风险惩罚
 """
 
 import numpy as np
@@ -17,6 +22,7 @@ class StateEvaluator:
     2. 走位质量
     3. 袋口机会
     4. 防守安全性
+    5. 风险评估（噪声鲁棒性）
     """
     
     # 固定的袋口位置
@@ -29,11 +35,19 @@ class StateEvaluator:
         'rt': np.array([1.02, 2.01]),
     }
     
-    def __init__(self, table_w: float = 0.99, table_l: float = 1.98):
+    def __init__(self, table_w: float = 0.99, table_l: float = 1.98,
+                 risk_weight: float = 1.0):
+        """
+        Args:
+            table_w: 球桌宽度
+            table_l: 球桌长度
+            risk_weight: 风险惩罚权重（越大越保守）
+        """
         self.table_w = table_w
         self.table_l = table_l
         self.ball_radius = 0.02625
         self.max_dist = np.sqrt(table_w**2 + table_l**2)
+        self.risk_weight = risk_weight
     
     def evaluate(self,
                  balls_before: Dict,
@@ -95,14 +109,21 @@ class StateEvaluator:
         if shot_result.get('NO_POCKET_NO_RAIL', False):
             score -= 20.0
         
-        # 4. 走位评估（只有进球后才重要）
+        # 4. 风险评估（噪声鲁棒性）
+        # 检查击球后黑八是否处于危险位置
+        risk_penalty = self._evaluate_risk(
+            balls_before, balls_after, my_targets, my_player
+        )
+        score -= risk_penalty * self.risk_weight
+        
+        # 5. 走位评估（只有进球后才重要）
         if len(own_pocketed) > 0:
             position_score = self._evaluate_position(
                 balls_after, my_targets
             )
             score += position_score * 0.5
         
-        # 5. 机会评估（如果没进球）
+        # 6. 机会评估（如果没进球）
         if len(own_pocketed) == 0:
             opportunity_score = self._evaluate_opportunities(
                 balls_after, my_targets
@@ -296,4 +317,132 @@ class StateEvaluator:
     
     def _get_ball_pos(self, ball) -> np.ndarray:
         return ball.state.rvw[0]
+    
+    def _evaluate_risk(self,
+                       balls_before: Dict,
+                       balls_after: Dict,
+                       my_targets: List[str],
+                       my_player: str) -> float:
+        """
+        评估风险（噪声可能导致的失误）
+        
+        主要风险：
+        1. 黑八接近袋口（噪声可能误打进）
+        2. 白球接近袋口（噪声可能落袋）
+        3. 击球路径经过黑八（噪声可能误触）
+        
+        Returns:
+            float: 风险惩罚值 [0, 200]
+        """
+        risk = 0.0
+        
+        # 检查己方是否还有球（可以打黑八的情况）
+        my_remaining = sum(1 for bid in my_targets 
+                          if bid != '8' and balls_after[bid].state.s != 4)
+        can_shoot_eight = (my_remaining == 0)
+        
+        # === 1. 黑八接近袋口的风险 ===
+        if balls_after['8'].state.s != 4:  # 黑八还在台上
+            eight_pos = self._get_ball_pos(balls_after['8'])[:2]
+            
+            for pocket_pos in self.POCKET_POSITIONS.values():
+                dist_to_pocket = np.linalg.norm(eight_pos - pocket_pos)
+                
+                # 黑八距离袋口很近
+                if dist_to_pocket < 0.15:  # 15cm
+                    if can_shoot_eight:
+                        # 可以打黑八时，接近袋口是好事
+                        risk -= 30.0  # 奖励
+                    else:
+                        # 不能打黑八时，接近袋口很危险
+                        risk += 100.0 * (0.15 - dist_to_pocket) / 0.15
+                elif dist_to_pocket < 0.3:  # 30cm
+                    if not can_shoot_eight:
+                        risk += 30.0 * (0.3 - dist_to_pocket) / 0.15
+        
+        # === 2. 白球接近袋口的风险 ===
+        if balls_after['cue'].state.s != 4:
+            cue_pos = self._get_ball_pos(balls_after['cue'])[:2]
+            
+            for pocket_pos in self.POCKET_POSITIONS.values():
+                dist_to_pocket = np.linalg.norm(cue_pos - pocket_pos)
+                
+                # 白球距离袋口很近
+                if dist_to_pocket < 0.1:  # 10cm
+                    risk += 50.0 * (0.1 - dist_to_pocket) / 0.1
+                elif dist_to_pocket < 0.2:  # 20cm
+                    risk += 20.0 * (0.2 - dist_to_pocket) / 0.1
+        
+        # === 3. 白球和黑八很接近的风险 ===
+        if balls_after['8'].state.s != 4 and balls_after['cue'].state.s != 4:
+            cue_pos = self._get_ball_pos(balls_after['cue'])[:2]
+            eight_pos = self._get_ball_pos(balls_after['8'])[:2]
+            
+            dist_cue_eight = np.linalg.norm(cue_pos - eight_pos)
+            
+            if not can_shoot_eight:
+                # 不能打黑八时，白球和黑八靠太近很危险
+                if dist_cue_eight < 0.1:  # 10cm
+                    risk += 80.0 * (0.1 - dist_cue_eight) / 0.1
+                elif dist_cue_eight < 0.2:  # 20cm
+                    risk += 30.0 * (0.2 - dist_cue_eight) / 0.1
+        
+        return max(0, risk)
+    
+    def evaluate_action_safety(self,
+                               cue_pos: np.ndarray,
+                               target_pos: np.ndarray,
+                               eight_pos: np.ndarray,
+                               phi: float,
+                               can_shoot_eight: bool) -> float:
+        """
+        评估动作的安全性（不执行模拟，快速估计）
+        
+        用于在采样阶段过滤危险动作
+        
+        Args:
+            cue_pos: 白球位置
+            target_pos: 目标球位置
+            eight_pos: 黑八位置
+            phi: 击球角度
+            can_shoot_eight: 是否可以打黑八
+        
+        Returns:
+            float: 安全评分 [0, 1]，越高越安全
+        """
+        if can_shoot_eight:
+            return 1.0  # 可以打黑八时没有特别危险
+        
+        # 计算击球方向
+        phi_rad = np.radians(phi)
+        shot_dir = np.array([np.cos(phi_rad), np.sin(phi_rad)])
+        
+        # 检查击球方向是否朝向黑八
+        cue_to_eight = eight_pos - cue_pos
+        dist_to_eight = np.linalg.norm(cue_to_eight)
+        
+        if dist_to_eight < 0.05:
+            return 0.0  # 太近了，非常危险
+        
+        cue_to_eight_norm = cue_to_eight / dist_to_eight
+        
+        # 击球方向与黑八方向的夹角
+        cos_angle = np.dot(shot_dir, cue_to_eight_norm)
+        
+        if cos_angle > 0.9:  # 几乎直接朝向黑八
+            if dist_to_eight < 0.3:
+                return 0.1  # 非常危险
+            elif dist_to_eight < 0.6:
+                return 0.4
+            else:
+                return 0.7
+        elif cos_angle > 0.7:
+            if dist_to_eight < 0.3:
+                return 0.3
+            else:
+                return 0.6
+        elif cos_angle > 0.5:
+            return 0.8
+        else:
+            return 1.0  # 方向远离黑八，安全
 

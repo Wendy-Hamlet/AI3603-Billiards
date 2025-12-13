@@ -273,7 +273,9 @@ class MCTSAgent:
                  time_limit: float = 5.0,
                  exploration_weight: float = 1.41,
                  rollout_depth: int = 3,
-                 n_action_samples: int = 30):
+                 n_action_samples: int = 30,
+                 noise_simulations: int = 3,
+                 risk_weight: float = 1.5):
         """
         Args:
             simulation_budget: 最大模拟次数
@@ -281,21 +283,26 @@ class MCTSAgent:
             exploration_weight: UCB1探索权重
             rollout_depth: rollout深度
             n_action_samples: 每层采样的动作数
+            noise_simulations: 每个动作的噪声模拟次数（取最差值）
+            risk_weight: 风险惩罚权重
         """
         self.simulation_budget = simulation_budget
         self.time_limit = time_limit
         self.exploration_weight = exploration_weight
         self.rollout_depth = rollout_depth
         self.n_action_samples = n_action_samples
+        self.noise_simulations = noise_simulations
+        self.risk_weight = risk_weight
         
-        self.evaluator = StateEvaluator()
+        self.evaluator = StateEvaluator(risk_weight=risk_weight)
         self.action_sampler = ActionSampler()
         
         # 统计信息
         self.stats = {
             'simulations': 0,
             'time_used': 0.0,
-            'best_value': 0.0
+            'best_value': 0.0,
+            'filtered_dangerous': 0
         }
     
     def select_action(self,
@@ -334,13 +341,48 @@ class MCTSAgent:
         for pid, pocket in table.pockets.items():
             pockets[pid] = pocket.center[:2]
         
+        # 获取黑八位置和是否可以打黑八
+        eight_pos = balls['8'].state.rvw[0][:2] if balls['8'].state.s != 4 else None
+        can_shoot_eight = (len(target_balls) == 1 and target_balls[0][0] == '8')
+        
         # 创建根节点
         root = MCTSNode()
         
         # 初始动作采样
         initial_actions = self.action_sampler.sample_actions(
-            cue_pos, target_balls, pockets, self.n_action_samples
+            cue_pos, target_balls, pockets, self.n_action_samples * 2  # 多采样一些用于过滤
         )
+        
+        # 过滤危险动作（可能误打黑八）
+        if eight_pos is not None and not can_shoot_eight:
+            safe_actions = []
+            for action in initial_actions:
+                target_pos = target_balls[0][1] if target_balls else cue_pos
+                safety = self.evaluator.evaluate_action_safety(
+                    cue_pos, target_pos, eight_pos, action.phi, can_shoot_eight
+                )
+                if safety >= 0.3:  # 只保留较安全的动作
+                    safe_actions.append(action)
+            
+            self.stats['filtered_dangerous'] = len(initial_actions) - len(safe_actions)
+            
+            # 如果过滤后太少，保留一部分
+            if len(safe_actions) < self.n_action_samples // 2:
+                # 按安全性排序，保留最安全的
+                actions_with_safety = []
+                for action in initial_actions:
+                    target_pos = target_balls[0][1] if target_balls else cue_pos
+                    safety = self.evaluator.evaluate_action_safety(
+                        cue_pos, target_pos, eight_pos, action.phi, can_shoot_eight
+                    )
+                    actions_with_safety.append((action, safety))
+                
+                actions_with_safety.sort(key=lambda x: x[1], reverse=True)
+                initial_actions = [a for a, s in actions_with_safety[:self.n_action_samples]]
+            else:
+                initial_actions = safe_actions[:self.n_action_samples]
+        else:
+            initial_actions = initial_actions[:self.n_action_samples]
         
         # MCTS主循环
         simulations = 0
@@ -422,25 +464,14 @@ class MCTSAgent:
         """
         模拟击球并评估结果
         
-        使用物理引擎精确模拟
+        使用噪声模拟增强鲁棒性：
+        - 多次模拟取最差/平均值
+        - 考虑噪声可能导致的失误
         """
         if node.action is None:
             return 0.0
         
-        # 复制环境状态
-        env_copy = self._copy_env(env)
-        
-        # 执行击球
         action_dict = node.action.to_dict()
-        result = env_copy.take_shot(action_dict)
-        
-        # 获取击球后的状态
-        balls_after, _, table = env_copy.get_observation()
-        balls_before = env.last_state
-        
-        # 检查游戏是否结束
-        game_done, game_info = env_copy.get_done()
-        winner = game_info.get('winner') if game_done else None
         
         # 确定对方目标球
         if '1' in my_targets:
@@ -448,23 +479,92 @@ class MCTSAgent:
         else:
             enemy_targets = [str(i) for i in range(1, 8)]
         
-        # 评估结果
-        value = self.evaluator.evaluate(
-            balls_before=balls_before,
-            balls_after=balls_after,
-            shot_result=result,
-            my_targets=my_targets,
-            enemy_targets=enemy_targets,
-            game_done=game_done,
-            winner=winner,
-            my_player=my_player
-        )
+        # 噪声模拟：多次执行取最差值（保守策略）
+        values = []
+        worst_game_done = False
+        worst_winner = None
+        
+        for sim_idx in range(self.noise_simulations):
+            # 复制环境状态
+            env_copy = self._copy_env(env)
+            
+            # 添加噪声（第一次模拟无噪声，后续加噪声）
+            if sim_idx > 0:
+                noisy_action = self._add_noise_to_action(action_dict)
+            else:
+                noisy_action = action_dict
+            
+            # 执行击球
+            result = env_copy.take_shot(noisy_action)
+            
+            # 获取击球后的状态
+            balls_after, _, table = env_copy.get_observation()
+            balls_before = env.last_state
+            
+            # 检查游戏是否结束
+            game_done, game_info = env_copy.get_done()
+            winner = game_info.get('winner') if game_done else None
+            
+            # 评估结果
+            value = self.evaluator.evaluate(
+                balls_before=balls_before,
+                balls_after=balls_after,
+                shot_result=result,
+                my_targets=my_targets,
+                enemy_targets=enemy_targets,
+                game_done=game_done,
+                winner=winner,
+                my_player=my_player
+            )
+            
+            values.append(value)
+            
+            # 记录最差情况
+            if game_done and (winner != my_player):
+                worst_game_done = True
+                worst_winner = winner
+        
+        # 使用保守策略：取最差值的加权平均
+        # 这样可以避免选择"运气好才能成功"的动作
+        min_value = min(values)
+        avg_value = sum(values) / len(values)
+        
+        # 70% 最差值 + 30% 平均值
+        final_value = 0.7 * min_value + 0.3 * avg_value
         
         # 记录即时奖励
-        node.immediate_reward = value
-        node.is_terminal = game_done
+        node.immediate_reward = final_value
+        node.is_terminal = worst_game_done
         
-        return value
+        return final_value
+    
+    def _add_noise_to_action(self, action: Dict[str, float]) -> Dict[str, float]:
+        """
+        给动作添加噪声，模拟实际执行时的误差
+        
+        噪声参数参考 poolenv.py 中的设置
+        """
+        noisy = action.copy()
+        
+        # 速度噪声：约 3%
+        noisy['V0'] = action['V0'] * (1 + np.random.normal(0, 0.03))
+        noisy['V0'] = max(0.5, min(8.0, noisy['V0']))
+        
+        # 角度噪声：约 0.5度
+        noisy['phi'] = action['phi'] + np.random.normal(0, 0.5)
+        noisy['phi'] = noisy['phi'] % 360
+        
+        # 垂直角度噪声
+        noisy['theta'] = action['theta'] + np.random.normal(0, 0.3)
+        noisy['theta'] = max(0, min(45, noisy['theta']))
+        
+        # 旋转参数噪声
+        noisy['a'] = action['a'] + np.random.normal(0, 0.01)
+        noisy['a'] = max(-0.4, min(0.4, noisy['a']))
+        noisy['b'] = action['b'] + np.random.normal(0, 0.01)
+        noisy['b'] = max(-0.4, min(0.4, noisy['b']))
+        
+        return noisy
     
     def _backpropagate(self, node: MCTSNode, value: float):
         """反向传播更新节点价值"""
