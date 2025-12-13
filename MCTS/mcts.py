@@ -1,4 +1,4 @@
-# MCTS core for billiards
+# MCTS / Bandit core for billiards
 
 import copy
 import math
@@ -8,9 +8,15 @@ from typing import Dict, List, Optional, Callable
 
 import numpy as np
 import pooltool as pt
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
 
 
 class MCTSNode:
+    """
+    保留的树节点结构（目前 bandit-style 搜索并未真正展开多步树，仅作为兼容占位）。
+    """
+
     def __init__(self, balls, table, my_targets, parent=None, action=None, depth=0):
         self.balls = balls
         self.table = table
@@ -18,7 +24,7 @@ class MCTSNode:
         self.parent = parent
         self.action = action
         self.depth = depth
-        self.children: List[MCTSNode] = []
+        self.children: List["MCTSNode"] = []
         self.visits = 0
         self.value = 0.0
 
@@ -26,127 +32,257 @@ class MCTSNode:
         return len(self.children) == 0
 
     def ucb_score(self, c=1.4):
-        if self.visits == 0:
-            return float('inf')
-        return self.value / self.visits + c * math.sqrt(math.log(self.parent.visits + 1) / self.visits)
+        if self.visits == 0 or self.parent is None:
+            return float("inf")
+        return self.value / self.visits + c * math.sqrt(
+            math.log(self.parent.visits + 1) / self.visits
+        )
+
+
+class CandidateStats:
+    """
+    记录单个候选动作的蒙特卡洛统计量：采样次数、均值和方差（Welford 在线算法）。
+    """
+
+    def __init__(self, action: dict):
+        self.action = action
+        self.n: int = 0
+        self.mean: float = 0.0
+        self.M2: float = 0.0  # 用于方差计算
+
+    def update(self, reward: float):
+        self.n += 1
+        delta = reward - self.mean
+        self.mean += delta / self.n
+        delta2 = reward - self.mean
+        self.M2 += delta * delta2
+
+    @property
+    def variance(self) -> float:
+        if self.n <= 1:
+            return 0.0
+        return max(self.M2 / (self.n - 1), 0.0)
+
+    @property
+    def std(self) -> float:
+        return math.sqrt(self.variance)
 
 
 class MCTSSolver:
+    """
+    Bandit-style 单杆蒙特卡洛搜索：
+
+    - 输入一批 candidate_actions（由 NewAgent 产生：geom / detour / defend / random）
+    - 对每个候选动作进行多次带噪声仿真
+    - 使用 UCB 在候选之间分配仿真预算
+    - 所有仿真阶段都通过 ThreadPoolExecutor 批量并行执行
+    - 最终按 mean - λ * std（λ = risk_aversion）选出相对稳定的动作
+    """
+
     def __init__(
         self,
         pbounds: Dict[str, tuple],
         reward_fn: Callable,
-        num_simulations: int = 120,
-        max_depth: int = 2,
-        exploration_c: float = 1.4,
-        rollout_per_leaf: int = 1,
+        num_simulations: int = 120,   # 总仿真预算（所有动作总和）
+        max_depth: int = 2,           # 保留参数
+        exploration_c: float = 1.4,   # UCB 探索系数
+        rollout_per_leaf: int = 1,    # 保留参数
         enable_noise: bool = True,
         noise_std: Optional[Dict[str, float]] = None,
+        first_hit_bonus: float = 6.0,
+        first_hit_penalty: float = 5.0,
+        risk_v0_softcap: float = 6.0,
+        risk_spin_softcap: float = 0.12,
+        risk_v0_weight: float = 0.4,
+        risk_spin_weight: float = 8.0,
+        risk_aversion: float = 0.4,   # 最终打分: mean - λ * std
+        num_workers=None,             # CPU并行线程数
     ):
         self.pbounds = pbounds
         self.reward_fn = reward_fn
-        self.num_simulations = num_simulations
+        self.num_simulations = max(0, int(num_simulations))
         self.max_depth = max_depth
         self.exploration_c = exploration_c
         self.rollout_per_leaf = rollout_per_leaf
         self.enable_noise = enable_noise
         self.noise_std = noise_std or {
-            'V0': 0.1,
-            'phi': 0.1,
-            'theta': 0.1,
-            'a': 0.003,
-            'b': 0.003,
+            "V0": 0.1,
+            "phi": 0.1,
+            "theta": 0.1,
+            "a": 0.003,
+            "b": 0.003,
         }
+        self.first_hit_bonus = first_hit_bonus
+        self.first_hit_penalty = first_hit_penalty
+        # 轻惩高风险动作：大力度、大侧旋在噪声下更容易失误
+        self.risk_v0_softcap = risk_v0_softcap
+        self.risk_spin_softcap = risk_spin_softcap
+        self.risk_v0_weight = risk_v0_weight
+        self.risk_spin_weight = risk_spin_weight
 
+        self.risk_aversion = max(0.0, float(risk_aversion))
+
+        # 并行 worker 数：默认最多 8 个（可以在 NewAgent 里显式传 num_workers）
+        if num_workers is None or num_workers <= 0:
+            cpu_cnt = os.cpu_count() or 1
+            self.num_workers = max(1, min(cpu_cnt, 8))
+        else:
+            self.num_workers = int(num_workers)
+
+    # ------------------------------------------------------------------
+    # 对外接口：bandit-style 单杆蒙特卡洛搜索（完全并行化仿真）
+    # ------------------------------------------------------------------
     def search(self, balls, my_targets, table, candidate_actions: List[dict]):
-        root = MCTSNode(copy.deepcopy(balls), copy.deepcopy(table), my_targets, None, None, 0)
-        root.children = [
-            MCTSNode(copy.deepcopy(balls), copy.deepcopy(table), my_targets, root, act, 1)
-            for act in candidate_actions
-        ]
-
-        for _ in range(self.num_simulations):
-            leaf = self._select(root)
-            value = self._simulate_from_node(leaf)
-            self._backpropagate(leaf, value)
-
-        if not root.children:
+        """
+        对给定的一批候选动作进行蒙特卡洛评估：每个动作固定模拟 3 次，取均值。
+        """
+        num_actions = len(candidate_actions)
+        if num_actions == 0:
             return None
-        best_child = max(root.children, key=lambda n: n.visits)
-        return best_child.action
 
-    def _select(self, node: MCTSNode) -> MCTSNode:
-        curr = node
-        while not curr.is_leaf() and curr.depth < self.max_depth:
-            curr = max(curr.children, key=lambda ch: ch.ucb_score(self.exploration_c))
-        return curr
+        stats_list = [CandidateStats(act) for act in candidate_actions]
+        repeats_per_action = 3
 
-    def _simulate_from_node(self, node: MCTSNode) -> float:
-        total = 0.0
-        for _ in range(self.rollout_per_leaf):
-            total += self._rollout_once(node)
-        return total / float(self.rollout_per_leaf)
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            futures = []
+            for idx, stat in enumerate(stats_list):
+                for _ in range(repeats_per_action):
+                    futures.append(
+                        executor.submit(
+                            self._evaluate_candidate_once,
+                            balls,
+                            table,
+                            my_targets,
+                            stat.action,
+                            idx,
+                        )
+                    )
+            for fut in as_completed(futures):
+                try:
+                    idx, reward = fut.result()
+                except Exception:
+                    idx, reward = 0, -500.0
+                stats_list[idx].update(reward)
 
-    def _rollout_once(self, node: MCTSNode) -> float:
-        balls = copy.deepcopy(node.balls)
-        table = copy.deepcopy(node.table)
-        my_targets = node.my_targets
-        depth = node.depth
-        value = 0.0
+        # 固定采样次数后直接按 mean 选取
+        best_idx = None
+        best_score = -float("inf")
+        for i, s in enumerate(stats_list):
+            if s.n == 0:
+                continue
+            if s.mean > best_score:
+                best_score = s.mean
+                best_idx = i
 
-        if node.action is not None:
-            reward, balls, table = self._simulate_action(balls, table, my_targets, node.action)
-            value += reward
+        if best_idx is None:
+            return random.choice(candidate_actions)
+        return stats_list[best_idx].action
 
-        while depth < self.max_depth:
-            action = self._random_action()
-            reward, balls, table = self._simulate_action(balls, table, my_targets, action)
-            value += reward * (0.9 ** depth)
-            depth += 1
-        return value
-
-    def _backpropagate(self, node: MCTSNode, value: float):
-        curr = node
-        while curr is not None:
-            curr.visits += 1
-            curr.value += value
-            curr = curr.parent
+    def _evaluate_candidate_once(self, balls, table, my_targets, action, idx: int):
+        """
+        供并行调用的单次评估函数，返回 (idx, reward)。
+        """
+        reward, _, _ = self._simulate_action(balls, table, my_targets, action)
+        return idx, reward
 
     def _simulate_action(self, balls, table, my_targets, action):
+        """
+        对单个动作做一次仿真：拷贝当前桌面和球状态，在噪声下击球并返回奖励。
+        这里会把 action['candidate_type'] 传给 reward_fn，用于区分 defend / 非 defend。
+        """
         sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
         sim_table = copy.deepcopy(table)
-        cue = pt.Cue(cue_ball_id='cue')
+        cue = pt.Cue(cue_ball_id="cue")
         shot = pt.System(table=sim_table, balls=sim_balls, cue=cue)
+
         act = self._apply_noise(action) if self.enable_noise else action
         try:
             cue.set_state(
-                V0=act['V0'],
-                phi=act['phi'],
-                theta=act['theta'],
-                a=act['a'],
-                b=act['b'],
+                V0=act["V0"],
+                phi=act["phi"],
+                theta=act["theta"],
+                a=act["a"],
+                b=act["b"],
             )
             with warnings.catch_warnings():
-                warnings.filterwarnings("error", category=RuntimeWarning, module=r"pooltool\.ptmath\.roots\.core")
+                warnings.filterwarnings(
+                    "error",
+                    category=RuntimeWarning,
+                    module=r"pooltool\.ptmath\.roots\.core",
+                )
                 pt.simulate(shot, inplace=True)
         except Exception:
+            # 仿真失败视为非常差的动作
             return -500.0, balls, table
-        reward = self.reward_fn(shot=shot, last_state=balls, player_targets=my_targets)
+
+        cand_type = None
+        if isinstance(action, dict):
+            cand_type = action.get("candidate_type", None)
+
+        # 注意：奖励函数现在可以根据 candidate_type 区分进攻/防守
+        reward = self.reward_fn(
+            shot=shot,
+            last_state=balls,
+            player_targets=my_targets,
+            candidate_type=cand_type,
+        )
+        # 额外轻微 shaping + 风险惩罚
+        if cand_type != "defend":
+            reward += self._first_hit_shaping(shot, my_targets)
+        reward -= self._risk_penalty(act)
         return reward, shot.balls, sim_table
+
+    def _first_hit_shaping(self, shot, my_targets):
+        """
+        对首碰球做一个轻微 shaping：优先碰到自己球。
+        """
+        first_contact_ball_id = None
+        for e in shot.events:
+            et = str(e.event_type).lower()
+            ids = list(e.ids) if hasattr(e, "ids") else []
+            if ("cushion" not in et) and ("pocket" not in et) and ("cue" in ids):
+                other_ids = [i for i in ids if i != "cue"]
+                if other_ids:
+                    first_contact_ball_id = other_ids[0]
+                    break
+        if first_contact_ball_id is None:
+            return -self.first_hit_penalty
+        return (
+            self.first_hit_bonus
+            if first_contact_ball_id in my_targets
+            else -self.first_hit_penalty
+        )
+
+    def _risk_penalty(self, action: dict) -> float:
+        """
+        Softly penalize high speed / large side spin shots that are fragile under noise.
+        """
+        v0_over = max(0.0, float(action.get("V0", 0.0)) - self.risk_v0_softcap)
+        spin_mag = abs(float(action.get("a", 0.0))) + abs(float(action.get("b", 0.0)))
+        spin_over = max(0.0, spin_mag - self.risk_spin_softcap)
+        return v0_over * self.risk_v0_weight + spin_over * self.risk_spin_weight
 
     def _apply_noise(self, action: dict) -> dict:
         noisy = dict(action)
         for k, std in self.noise_std.items():
-            noisy[k] = float(np.clip(noisy[k] + np.random.normal(0, std), *self.pbounds[k]))
-        if 'phi' in noisy:
-            noisy['phi'] = noisy['phi'] % 360.0
+            noisy[k] = float(
+                np.clip(noisy[k] + np.random.normal(0, std), *self.pbounds[k])
+            )
+        if "phi" in noisy:
+            noisy["phi"] = noisy["phi"] % 360.0
         return noisy
 
     def _random_action(self):
         return {
-            'V0': random.uniform(max(0.8, self.pbounds['V0'][0]), min(6.5, self.pbounds['V0'][1])),
-            'phi': random.uniform(*self.pbounds['phi']),
-            'theta': random.uniform(0.0, min(12.0, self.pbounds['theta'][1])),
-            'a': random.uniform(max(-0.2, self.pbounds['a'][0]), min(0.2, self.pbounds['a'][1])),
-            'b': random.uniform(max(-0.2, self.pbounds['b'][0]), min(0.2, self.pbounds['b'][1])),
+            "V0": random.uniform(
+                max(0.8, self.pbounds["V0"][0]), min(6.5, self.pbounds["V0"][1])
+            ),
+            "phi": random.uniform(*self.pbounds["phi"]),
+            "theta": random.uniform(0.0, min(12.0, self.pbounds["theta"][1])),
+            "a": random.uniform(
+                max(-0.2, self.pbounds["a"][0]), min(0.2, self.pbounds["a"][1])
+            ),
+            "b": random.uniform(
+                max(-0.2, self.pbounds["b"][0]), min(0.2, self.pbounds["b"][1])
+            ),
         }

@@ -22,10 +22,7 @@ import os
 from datetime import datetime
 import random
 
-try:
-    from .agent import Agent, BasicAgent, NewAgent  # package import
-except ImportError:
-    from agent import Agent, BasicAgent, NewAgent  # script/direct import fallback
+from agent import Agent, BasicAgent, NewAgent
 
 
 def collect_ball_states(shot):
@@ -78,12 +75,14 @@ def restore_balls_state(saved_state):
 class PoolEnv():
     """台球对战环境"""
     
-    def __init__(self):
+    def __init__(self, enable_render: bool = True):
         """初始化环境（需调用 reset() 后才能使用）"""
         # 桌面和球
         self.table = None
         self.balls = None
         self.cue = None
+        # 是否实时渲染
+        self.enable_render = enable_render
 
         # A和B方的球的ID
         self.player_targets = None
@@ -103,8 +102,9 @@ class PoolEnv():
         self.MAX_HIT_COUNT = 60
         # 记录所有shot，用于赛后render正常比赛，或者保存比赛记录
         self.shot_record = pt.MultiSystem()
-        
-        # 击球参数噪声标准差（模拟真实误差）（前期调试的时候可以先禁用）（0.1-0.1-0.1-0.003-0.003这个组合就显著让agent的性能退化 从单局平均25杆到了单局平均35杆）
+        # 渲染失败不应中断模拟
+        self._render_error_logged = False
+        # 击球参数噪声标准差（模拟真实误差）
         self.noise_std = {
             'V0': 0.1,      # 速度标准差 
             'phi': 0.1,      # 水平角度标准差（度）
@@ -113,6 +113,25 @@ class PoolEnv():
             'b': 0.003        # 纵向偏移标准差 球半径的比例（无量纲）
         }
         self.enable_noise = True  # 是否启用噪声
+    
+    def _render_shot(self, shot, title: str = None):
+        """使用 pooltool 自带的可视化窗口展示单杆结果"""
+        try:
+            pt.show(shot, title=title or "shot")
+        except Exception as e:
+            if not self._render_error_logged:
+                print(f"[PoolEnv] 渲染失败，后续不再重复提示: {e}")
+                self._render_error_logged = True
+
+    def render_all(self, title: str = None):
+        """展示整局已记录的所有杆（需手动关闭窗口继续）"""
+        if len(self.shot_record) == 0:
+            print("[PoolEnv] 无可渲染记录")
+            return
+        try:
+            pt.show(self.shot_record, title=title or "all shots")
+        except Exception as e:
+            print(f"[PoolEnv] 渲染失败: {e}")
 
     def get_observation(self, player=None):
         """
@@ -296,6 +315,8 @@ class PoolEnv():
         pt.simulate(shot, inplace=True)
         # 记录所有shot，用于游戏结束后进行render
         self.shot_record.append(copy.deepcopy(shot))
+        if self.enable_render:
+            self._render_shot(self.shot_record[-1], title=f"hit count: {self.hit_count}")
 
         # 获取 final_states
         # final_states = collect_ball_states(shot)
@@ -398,12 +419,32 @@ class PoolEnv():
             return {'ME_INTO_POCKET': own_pocketed, 'ENEMY_INTO_POCKET': enemy_pocketed, 'WHITE_BALL_INTO_POCKET': False, 'BLACK_BALL_INTO_POCKET': False, 'FOUL_FIRST_HIT': False, 'NO_POCKET_NO_RAIL': False, 'NO_HIT': True, 'BALLS': copy.deepcopy(self.balls)}
 
         if first_contact_ball_id is not None:
-            opponent_plus_eight = [bid for bid in self.balls.keys() if bid not in self.player_targets[player] and bid not in ['cue']]
-            if ('8' not in opponent_plus_eight):
-                opponent_plus_eight.append('8')
-            if len(remaining_own_before) > 0 and first_contact_ball_id in opponent_plus_eight:
-                print(f"⚠️ Player {player} 首次碰撞为对方球或黑8，交换球权。")
-                self.curr_player = 1 - self.curr_player
+            # 修复：根据剩余球情况判断首球规则
+            if len(remaining_own_before) > 0:
+                # 己方球未清空：首球必须碰自己的球
+                if first_contact_ball_id not in self.player_targets[player]:
+                    print(f"⚠️ Player {player} 首次碰撞非己方球，交换球权。")
+                    self.curr_player = 1 - self.curr_player
+                    self.last_state = save_balls_state(self.balls)
+                    self.hit_count += 1
+                    if self.hit_count >= self.MAX_HIT_COUNT:
+                        print(f"⏰ 达到最大击球数，比赛结束！")
+                        self.done = True
+                        a_left = len([bid for bid in self.player_targets["A"] if bid != '8' and self.balls[bid].state.s != 4])
+                        b_left = len([bid for bid in self.player_targets["B"] if bid != '8' and self.balls[bid].state.s != 4])
+                        if a_left < b_left:
+                            self.winner = "A"
+                        elif b_left < a_left:
+                            self.winner = "B"
+                        else:
+                            self.winner = "SAME"
+                        print(f"📊 最大击球数详情：A剩余 {a_left}，B剩余 {b_left}，胜者：{self.winner}")
+                    return {'ME_INTO_POCKET': own_pocketed, 'ENEMY_INTO_POCKET': enemy_pocketed, 'WHITE_BALL_INTO_POCKET': False, 'BLACK_BALL_INTO_POCKET': False, 'FOUL_FIRST_HIT': True, 'NO_POCKET_NO_RAIL': False, 'BALLS': copy.deepcopy(self.balls)}
+            else:
+                # 己方球已清空：首球必须碰黑8
+                if first_contact_ball_id != '8':
+                    print(f"⚠️ Player {player} 己方球已清空但首次碰撞非黑8，交换球权。")
+                    self.curr_player = 1 - self.curr_player
                 self.last_state = save_balls_state(self.balls)
                 self.hit_count += 1
                 if self.hit_count >= self.MAX_HIT_COUNT:
@@ -420,8 +461,9 @@ class PoolEnv():
                     print(f"📊 最大击球数详情：A剩余 {a_left}，B剩余 {b_left}，胜者：{self.winner}")
                 return {'ME_INTO_POCKET': own_pocketed, 'ENEMY_INTO_POCKET': enemy_pocketed, 'WHITE_BALL_INTO_POCKET': False, 'BLACK_BALL_INTO_POCKET': False, 'FOUL_FIRST_HIT': True, 'NO_POCKET_NO_RAIL': False, 'BALLS': copy.deepcopy(self.balls)}
 
-        if len(new_pocketed) == 0 and ((not cue_hit_cushion) or (not target_hit_cushion)):
-            print(f"⚠️ 本杆无进球且母球或目标球未碰库，交换球权。")
+        # 修复：无进球时必须母球和目标球至少一个碰库
+        if len(new_pocketed) == 0 and (not cue_hit_cushion) and (not target_hit_cushion):
+            print(f"⚠️ 本杆无进球且母球和目标球均未碰库，交换球权。")
             self.curr_player = 1 - self.curr_player
             self.last_state = save_balls_state(self.balls)
             self.hit_count += 1
@@ -474,7 +516,7 @@ if __name__ == '__main__':
     """一段测试PoolEnv的代码"""
     
     # 初始化任务环境
-    env = PoolEnv()
+    env = PoolEnv(enable_render=True)
 
     agent_a, agent_b = BasicAgent(), NewAgent()
 
