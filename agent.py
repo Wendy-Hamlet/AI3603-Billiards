@@ -379,19 +379,332 @@ class BasicAgent(Agent):
             traceback.print_exc()
             return self._random_action()
 
+
 class NewAgent(Agent):
-    """自定义 Agent 模板（待学生实现）"""
+    """增强版Agent - 混合策略 + 噪声鲁棒优化
+    
+    核心改进：
+    1. 战略层：根据局面选择进攻/防守/清台策略
+    2. 噪声模拟：在优化时主动添加多次噪声采样，筛选鲁棒动作
+    3. 黑8保护：严格过滤可能误打黑8的危险动作
+    4. 搜索空间优化：根据策略缩小搜索范围，提升速度和质量
+    """
     
     def __init__(self):
-        pass
-    
-    def decision(self, balls=None, my_targets=None, table=None):
-        """决策方法
+        super().__init__()
         
-        参数：
-            observation: (balls, my_targets, table)
+        # 基础搜索空间（会根据策略动态调整）
+        self.pbounds = {
+            'V0': (0.5, 8.0),
+            'phi': (0, 360),
+            'theta': (0, 90), 
+            'a': (-0.3, 0.3),  # 减小偏移范围，提升精准度
+            'b': (-0.3, 0.3)
+        }
+        
+        # 优化参数（比BasicAgent更快）
+        self.INITIAL_SEARCH = 15  # 减少初始搜索
+        self.OPT_SEARCH = 8       # 减少优化迭代
+        self.ALPHA = 1e-2
+        
+        # 噪声鲁棒性参数
+        self.noise_std = {
+            'V0': 0.1,
+            'phi': 0.1,
+            'theta': 0.1,
+            'a': 0.003,
+            'b': 0.003
+        }
+        self.N_NOISE_SAMPLES = 5  # 每个动作测试5次噪声采样
+        
+        print("NewAgent (Enhanced Hybrid) 已初始化。")
+    
+    def _analyze_game_state(self, balls, my_targets):
+        """分析当前局面，制定战略
         
         返回：
-            dict: {'V0', 'phi', 'theta', 'a', 'b'}
+            strategy: 'aggressive' | 'defensive' | 'finish' | 'safe'
+            pbounds: 调整后的搜索空间
         """
-        return self._random_action()
+        # 统计球数
+        my_remaining = [bid for bid in my_targets if balls[bid].state.s != 4]
+        all_balls_on_table = [bid for bid, b in balls.items() if b.state.s != 4 and bid != 'cue']
+        enemy_remaining = [bid for bid in all_balls_on_table if bid not in my_targets and bid != '8']
+        
+        n_my = len(my_remaining)
+        n_enemy = len(enemy_remaining)
+        is_finish_phase = (my_targets == ['8'])  # 清台阶段
+        
+        print(f"[NewAgent] 局面分析: 己方球={n_my}, 对方球={n_enemy}, 清台阶段={is_finish_phase}")
+        
+        # 战略决策
+        if is_finish_phase:
+            strategy = 'finish'
+            # 清台阶段：中等速度，高精度
+            pbounds = {
+                'V0': (2.0, 5.0),      # 稳定速度
+                'phi': (0, 360),
+                'theta': (0, 60),      # 减小跳球角度
+                'a': (-0.2, 0.2),      # 更小的偏移
+                'b': (-0.2, 0.2)
+            }
+        elif n_my <= 2:
+            strategy = 'aggressive'
+            # 己方优势：快速清台
+            pbounds = {
+                'V0': (3.0, 7.0),      # 高速
+                'phi': (0, 360),
+                'theta': (0, 75),
+                'a': (-0.3, 0.3),
+                'b': (-0.3, 0.3)
+            }
+        elif n_enemy <= 2:
+            strategy = 'defensive'
+            # 对方优势：保守打法，制造障碍
+            pbounds = {
+                'V0': (0.5, 3.5),      # 低速精准
+                'phi': (0, 360),
+                'theta': (0, 50),
+                'a': (-0.2, 0.2),
+                'b': (-0.2, 0.2)
+            }
+        else:
+            strategy = 'safe'
+            # 中局：平衡策略
+            pbounds = {
+                'V0': (1.5, 6.0),
+                'phi': (0, 360),
+                'theta': (0, 70),
+                'a': (-0.25, 0.25),
+                'b': (-0.25, 0.25)
+            }
+        
+        print(f"[NewAgent] 采用策略: {strategy}")
+        return strategy, pbounds
+    
+    def _is_action_safe(self, action, balls, my_targets, table):
+        """安全性检查：防止误打黑8（关键！）
+        
+        返回：
+            bool: True表示安全，False表示危险
+        """
+        if my_targets == ['8']:
+            return True  # 清台阶段，黑8就是目标
+        
+        # 快速模拟：只检查是否会打进黑8或白球
+        sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+        sim_table = copy.deepcopy(table)
+        cue = pt.Cue(cue_ball_id="cue")
+        shot = pt.System(table=sim_table, balls=sim_balls, cue=cue)
+        
+        try:
+            shot.cue.set_state(
+                V0=action['V0'],
+                phi=action['phi'],
+                theta=action['theta'],
+                a=action['a'],
+                b=action['b']
+            )
+            
+            if not simulate_with_timeout(shot, timeout=2):
+                return False  # 超时也算不安全
+            
+            # 检查黑8和白球是否进袋
+            eight_ball = shot.balls.get('8')
+            cue_ball = shot.balls.get('cue')
+            
+            if eight_ball and eight_ball.state.s == 4:
+                return False  # 黑8进袋，危险！
+            if cue_ball and cue_ball.state.s == 4:
+                return False  # 白球进袋，危险！
+            
+            return True
+            
+        except Exception as e:
+            return False  # 模拟失败也算不安全
+    
+    def _robust_reward_evaluation(self, V0, phi, theta, a, b, balls, my_targets, table, last_state_snapshot):
+        """噪声鲁棒性评估：多次采样取平均
+        
+        这是关键改进：不再只看无噪声情况，而是测试真实环境噪声下的表现
+        """
+        scores = []
+        
+        for _ in range(self.N_NOISE_SAMPLES):
+            sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+            sim_table = copy.deepcopy(table)
+            cue = pt.Cue(cue_ball_id="cue")
+            shot = pt.System(table=sim_table, balls=sim_balls, cue=cue)
+            
+            try:
+                # 添加噪声（模拟真实环境）
+                V0_noisy = V0 + np.random.normal(0, self.noise_std['V0'])
+                phi_noisy = phi + np.random.normal(0, self.noise_std['phi'])
+                theta_noisy = theta + np.random.normal(0, self.noise_std['theta'])
+                a_noisy = a + np.random.normal(0, self.noise_std['a'])
+                b_noisy = b + np.random.normal(0, self.noise_std['b'])
+                
+                # 参数裁剪
+                V0_noisy = np.clip(V0_noisy, 0.5, 8.0)
+                phi_noisy = phi_noisy % 360
+                theta_noisy = np.clip(theta_noisy, 0, 90)
+                a_noisy = np.clip(a_noisy, -0.5, 0.5)
+                b_noisy = np.clip(b_noisy, -0.5, 0.5)
+                
+                shot.cue.set_state(V0=V0_noisy, phi=phi_noisy, theta=theta_noisy, 
+                                  a=a_noisy, b=b_noisy)
+                
+                if not simulate_with_timeout(shot, timeout=2):
+                    scores.append(-100)  # 超时惩罚
+                    continue
+                
+                # 计算得分
+                score = analyze_shot_for_reward(
+                    shot=shot,
+                    last_state=last_state_snapshot,
+                    player_targets=my_targets
+                )
+                
+                # 额外惩罚误打黑8（即使概率低也要严厉惩罚）
+                eight_ball = shot.balls.get('8')
+                if eight_ball and eight_ball.state.s == 4 and my_targets != ['8']:
+                    score -= 200  # 严重惩罚
+                
+                scores.append(score)
+                
+            except Exception as e:
+                scores.append(-500)  # 模拟失败
+        
+        # 返回平均分（鲁棒性指标）
+        avg_score = np.mean(scores)
+        min_score = np.min(scores)  # 最坏情况
+        
+        # 综合评分：70%平均 + 30%最坏情况（避免高风险动作）
+        return 0.7 * avg_score + 0.3 * min_score
+    
+    def _create_optimizer(self, reward_function, seed, pbounds):
+        """创建优化器（复用BasicAgent的方法）"""
+        gpr = GaussianProcessRegressor(
+            kernel=Matern(nu=2.5),
+            alpha=self.ALPHA,
+            n_restarts_optimizer=10,
+            random_state=seed
+        )
+        
+        bounds_transformer = SequentialDomainReductionTransformer(
+            gamma_osc=0.8,
+            gamma_pan=1.0
+        )
+        
+        optimizer = BayesianOptimization(
+            f=reward_function,
+            pbounds=pbounds,
+            random_state=seed,
+            verbose=0,
+            bounds_transformer=bounds_transformer
+        )
+        optimizer._gp = gpr
+        
+        return optimizer
+    
+    def decision(self, balls=None, my_targets=None, table=None):
+        """主决策函数
+        
+        流程：
+        1. 分析局面 → 选择策略
+        2. 调整搜索空间
+        3. 贝叶斯优化（带噪声鲁棒性测试）
+        4. 安全性二次验证
+        """
+        if balls is None:
+            print(f"[NewAgent] 缺少关键信息，使用随机动作。")
+            return self._random_action()
+        
+        try:
+            # 保存状态快照
+            last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+            
+            # 检查是否清台
+            remaining_own = [bid for bid in my_targets if balls[bid].state.s != 4]
+            if len(remaining_own) == 0:
+                my_targets = ["8"]
+                print("[NewAgent] 己方球已清空，切换目标为黑8")
+            
+            # 步骤1：战略分析
+            strategy, pbounds = self._analyze_game_state(balls, my_targets)
+            
+            # 步骤2：定义鲁棒性奖励函数
+            def reward_fn_wrapper(V0, phi, theta, a, b):
+                return self._robust_reward_evaluation(
+                    V0, phi, theta, a, b, 
+                    balls, my_targets, table, last_state_snapshot
+                )
+            
+            # 步骤3：贝叶斯优化
+            print(f"[NewAgent] 开始优化（策略={strategy}）...")
+            seed = np.random.randint(1e6)
+            optimizer = self._create_optimizer(reward_fn_wrapper, seed, pbounds)
+            
+            optimizer.maximize(
+                init_points=self.INITIAL_SEARCH,
+                n_iter=self.OPT_SEARCH
+            )
+            
+            best_result = optimizer.max
+            best_params = best_result['params']
+            best_score = best_result['target']
+            
+            # 步骤4：构造动作并进行安全性检查
+            action = {
+                'V0': float(best_params['V0']),
+                'phi': float(best_params['phi']),
+                'theta': float(best_params['theta']),
+                'a': float(best_params['a']),
+                'b': float(best_params['b'])
+            }
+            
+            # 关键：二次安全验证（防止误打黑8）
+            if not self._is_action_safe(action, balls, my_targets, table):
+                print(f"[NewAgent] 警告：最佳动作可能误打黑8，重新搜索...")
+                # 使用更保守的参数重试一次
+                pbounds_safe = {
+                    'V0': (1.0, 4.0),  # 降低速度
+                    'phi': (0, 360),
+                    'theta': (0, 50),  # 减小角度
+                    'a': (-0.15, 0.15),
+                    'b': (-0.15, 0.15)
+                }
+                optimizer2 = self._create_optimizer(reward_fn_wrapper, seed+1, pbounds_safe)
+                optimizer2.maximize(init_points=10, n_iter=5)
+                
+                best_result = optimizer2.max
+                best_params = best_result['params']
+                best_score = best_result['target']
+                
+                action = {
+                    'V0': float(best_params['V0']),
+                    'phi': float(best_params['phi']),
+                    'theta': float(best_params['theta']),
+                    'a': float(best_params['a']),
+                    'b': float(best_params['b'])
+                }
+            
+            # 如果得分太低，使用随机动作（但要安全）
+            if best_score < 5:
+                print(f"[NewAgent] 未找到好方案（最高分={best_score:.2f}），尝试安全随机动作")
+                for _ in range(10):
+                    action = self._random_action()
+                    if self._is_action_safe(action, balls, my_targets, table):
+                        break
+            
+            print(f"[NewAgent] 决策 (鲁棒得分={best_score:.2f}): "
+                  f"V0={action['V0']:.2f}, phi={action['phi']:.2f}, "
+                  f"θ={action['theta']:.2f}, a={action['a']:.3f}, b={action['b']:.3f}")
+            
+            return action
+            
+        except Exception as e:
+            print(f"[NewAgent] 决策失败，使用随机动作。错误: {e}")
+            import traceback
+            traceback.print_exc()
+            return self._random_action()
