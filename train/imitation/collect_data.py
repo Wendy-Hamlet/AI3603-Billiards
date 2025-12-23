@@ -135,6 +135,22 @@ def extract_action(action):
     return np.array([V0_norm, phi_sin, phi_cos, theta_norm, a_norm, b_norm], dtype=np.float32)
 
 
+class SuppressOutput:
+    """抑制标准输出"""
+    def __enter__(self):
+        self._devnull = open(os.devnull, 'w')
+        self._stdout = sys.stdout
+        self._stderr = sys.stderr
+        sys.stdout = self._devnull
+        sys.stderr = self._devnull
+        return self
+    
+    def __exit__(self, *args):
+        sys.stdout = self._stdout
+        sys.stderr = self._stderr
+        self._devnull.close()
+
+
 def collect_single_game(args):
     """
     收集单局游戏数据
@@ -146,76 +162,79 @@ def collect_single_game(args):
     # 设置 CPU 亲和性
     set_cpu_affinity(cpu_core, num_cores)
     
-    # 延迟导入
-    from poolenv import PoolEnv
-    from agent import BasicAgent, NewAgent
+    # 延迟导入（抑制导入时的输出）
+    with SuppressOutput():
+        from poolenv import PoolEnv
+        from agent import BasicAgent, NewAgent
     
     try:
-        # 创建环境和 agent
-        env = PoolEnv()
-        mcts_agent = NewAgent(
-            num_candidates=mcts_candidates,
-            num_simulations=mcts_simulations,
-            num_workers=1,
-        )
-        basic_agent = BasicAgent()
-        
-        # 随机选择先手和球型
-        mcts_first = game_id % 2 == 0
-        ball_type = ['solid', 'stripe'][game_id % 2]
-        
-        env.reset(target_ball=ball_type)
-        
-        states = []
-        actions = []
-        
-        step = 0
-        max_steps = 100
-        
-        while step < max_steps:
-            player = env.get_curr_player()
-            obs = env.get_observation(player)
-            balls, my_targets, table = obs
+        # 抑制所有游戏输出
+        with SuppressOutput():
+            # 创建环境和 agent
+            env = PoolEnv()
+            mcts_agent = NewAgent(
+                num_candidates=mcts_candidates,
+                num_simulations=mcts_simulations,
+                num_workers=1,
+            )
+            basic_agent = BasicAgent()
             
-            is_mcts_turn = (player == 'A' and mcts_first) or (player == 'B' and not mcts_first)
+            # 随机选择先手和球型
+            mcts_first = game_id % 2 == 0
+            ball_type = ['solid', 'stripe'][game_id % 2]
             
-            if is_mcts_turn:
-                # MCTS agent 的回合，收集数据
-                action = mcts_agent.decision(*obs)
+            env.reset(target_ball=ball_type)
+            
+            states = []
+            actions = []
+            
+            step = 0
+            max_steps = 100
+            
+            while step < max_steps:
+                player = env.get_curr_player()
+                obs = env.get_observation(player)
+                balls, my_targets, table = obs
                 
-                # 提取特征
-                state_feat = extract_state_features(balls, my_targets, table)
-                action_feat = extract_action(action)
+                is_mcts_turn = (player == 'A' and mcts_first) or (player == 'B' and not mcts_first)
                 
-                states.append(state_feat)
-                actions.append(action_feat)
-            else:
-                # BasicAgent 的回合
-                action = basic_agent.decision(*obs)
+                if is_mcts_turn:
+                    # MCTS agent 的回合，收集数据
+                    action = mcts_agent.decision(*obs)
+                    
+                    # 提取特征
+                    state_feat = extract_state_features(balls, my_targets, table)
+                    action_feat = extract_action(action)
+                    
+                    states.append(state_feat)
+                    actions.append(action_feat)
+                else:
+                    # BasicAgent 的回合
+                    action = basic_agent.decision(*obs)
+                
+                try:
+                    env.take_shot(action)
+                except Exception as e:
+                    break
+                
+                done, info = env.get_done()
+                if done:
+                    winner = info.get('winner', 'SAME')
+                    mcts_win = (winner == 'A' and mcts_first) or (winner == 'B' and not mcts_first)
+                    return (
+                        np.array(states, dtype=np.float32) if states else np.zeros((0, 80), dtype=np.float32),
+                        np.array(actions, dtype=np.float32) if actions else np.zeros((0, 6), dtype=np.float32),
+                        {'game_id': game_id, 'mcts_win': mcts_win, 'samples': len(states)}
+                    )
+                
+                step += 1
             
-            try:
-                env.take_shot(action)
-            except Exception as e:
-                break
-            
-            done, info = env.get_done()
-            if done:
-                winner = info.get('winner', 'SAME')
-                mcts_win = (winner == 'A' and mcts_first) or (winner == 'B' and not mcts_first)
-                return (
-                    np.array(states, dtype=np.float32) if states else np.zeros((0, 80), dtype=np.float32),
-                    np.array(actions, dtype=np.float32) if actions else np.zeros((0, 6), dtype=np.float32),
-                    {'game_id': game_id, 'mcts_win': mcts_win, 'samples': len(states)}
-                )
-            
-            step += 1
-        
-        # 超过最大步数
-        return (
-            np.array(states, dtype=np.float32) if states else np.zeros((0, 80), dtype=np.float32),
-            np.array(actions, dtype=np.float32) if actions else np.zeros((0, 6), dtype=np.float32),
-            {'game_id': game_id, 'mcts_win': False, 'samples': len(states), 'timeout': True}
-        )
+            # 超过最大步数
+            return (
+                np.array(states, dtype=np.float32) if states else np.zeros((0, 80), dtype=np.float32),
+                np.array(actions, dtype=np.float32) if actions else np.zeros((0, 6), dtype=np.float32),
+                {'game_id': game_id, 'mcts_win': False, 'samples': len(states), 'timeout': True}
+            )
         
     except Exception as e:
         return (
@@ -346,17 +365,18 @@ def main():
                 
                 completed += 1
                 
-                # 进度显示
-                elapsed = time.time() - start_time
-                speed = completed / elapsed if elapsed > 0 else 0
-                eta = (args.num_games - completed) / speed if speed > 0 else 0
-                win_rate = mcts_wins / completed if completed > 0 else 0
-                
-                print(f"\r[{completed}/{args.num_games}] "
-                      f"Samples: {total_samples} | "
-                      f"MCTS WR: {win_rate:.1%} | "
-                      f"Speed: {speed:.1f} g/s | "
-                      f"ETA: {eta/60:.1f}min", end='', flush=True)
+                # 进度显示（每 100 局输出一次）
+                if completed % 100 == 0 or completed == args.num_games:
+                    elapsed = time.time() - start_time
+                    speed = completed / elapsed if elapsed > 0 else 0
+                    eta = (args.num_games - completed) / speed if speed > 0 else 0
+                    win_rate = mcts_wins / completed if completed > 0 else 0
+                    
+                    print(f"[{completed:6d}/{args.num_games}] "
+                          f"Samples: {total_samples:8d} | "
+                          f"MCTS WR: {win_rate:.1%} | "
+                          f"Speed: {speed:.2f} g/s | "
+                          f"ETA: {eta/60:.1f}min")
                 
                 # 检查点
                 if completed % args.checkpoint_interval == 0:
