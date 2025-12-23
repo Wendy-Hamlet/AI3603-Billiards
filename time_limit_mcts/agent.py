@@ -492,7 +492,7 @@ class NewAgent(Agent):
 
     def __init__(
         self,
-        num_candidates: int = 30,
+        num_candidates: int = 50,
         num_simulations: int = 180,
         time_limit_s: float = 3.0,
         max_depth: int = 2,           # 保留参数，占位
@@ -854,7 +854,7 @@ class NewAgent(Agent):
         follow_draw_profiles = [spin_profiles[1], spin_profiles[2]]
         side_profiles = [spin_profiles[3], spin_profiles[4]]
 
-        def add_templated_geom_actions(base_phi_deg, base_v0, base_cost):
+        def add_templated_geom_actions(base_phi_deg, base_v0, base_cost, ball_xy, pocket_xy, aim_xy):
             chosen = [
                 plain_prof,
                 random.choice(follow_draw_profiles),
@@ -879,7 +879,173 @@ class NewAgent(Agent):
                     extra_cost = 0.08
                 elif prof["name"] in ("side_left", "side_right"):
                     extra_cost = 0.12
+                action["prior_penalty"] = prior_penalty_for_action(
+                    action, ball_xy, pocket_xy, aim_xy, is_detour=False
+                )
                 candidates.append((float(base_cost + extra_cost), action))
+
+        def angle_diff_deg(a_deg: float, b_deg: float) -> float:
+            diff = (a_deg - b_deg + 180.0) % 360.0 - 180.0
+            return abs(diff)
+
+        def unit_vec(vec):
+            norm = float(np.linalg.norm(vec))
+            if norm < 1e-9:
+                return np.array([1.0, 0.0], dtype=float), 0.0
+            return vec / norm, norm
+
+        def rot90(vec):
+            return np.array([-vec[1], vec[0]], dtype=float)
+
+        def sector_risk(
+            origin_xy,
+            phi_deg: float,
+            length: float,
+            v0: float,
+            v0_std: float,
+            dphi_deg: float,
+            black_xy,
+        ) -> float:
+            if length <= 1e-6:
+                return 0.0
+            v0 = max(float(v0), 1e-3)
+            vmin = max(0.1, v0 - 3.0 * v0_std)
+            vmax = v0 + 3.0 * v0_std
+            ratio_min = max(0.4, vmin / v0)
+            ratio_max = min(1.6, vmax / v0)
+            l_min = length * ratio_min
+            l_max = length * ratio_max
+            if l_min > l_max:
+                l_min, l_max = l_max, l_min
+
+            vec = black_xy - origin_xy
+            r = float(np.linalg.norm(vec))
+            if r < 1e-9:
+                return 1.0
+            ang = float(math.degrees(math.atan2(vec[1], vec[0])) % 360.0)
+            dtheta = angle_diff_deg(ang, phi_deg)
+            dphi = max(float(dphi_deg), 0.5)
+
+            if dtheta <= dphi:
+                if r < l_min:
+                    dist = l_min - r
+                elif r > l_max:
+                    dist = r - l_max
+                else:
+                    dist = 0.0
+            else:
+                angle_excess = math.radians(dtheta - dphi)
+                r_clamp = min(max(r, l_min), l_max)
+                lateral = r_clamp * math.sin(angle_excess)
+                if r < l_min:
+                    radial = l_min - r
+                elif r > l_max:
+                    radial = r - l_max
+                else:
+                    radial = 0.0
+                dist = math.hypot(lateral, radial)
+
+            scale = max(ball_radius * 2.0, length * math.tan(math.radians(dphi)))
+            scale = max(scale, 1e-4)
+            risk = math.exp(-0.5 * (dist / scale) ** 2)
+            return float(max(0.0, min(1.0, risk)))
+
+        def prior_penalty_for_action(action, ball_xy, pocket_xy, aim_xy, is_detour: bool) -> float:
+            black_ball = balls.get("8", None)
+            if black_ball is None or getattr(black_ball.state, "s", 0) == 4:
+                return 0.0
+            if len(my_targets) == 1 and my_targets[0] == "8":
+                return 0.0
+            black_xy = np.array(black_ball.state.rvw[0], dtype=float)[:2]
+
+            phi_std = float(self.noise_std.get("phi", 0.1))
+            v0_std = float(self.noise_std.get("V0", 0.1))
+            dphi_deg = 3.0 * phi_std
+            spin_mag = abs(float(action.get("a", 0.0))) + abs(float(action.get("b", 0.0)))
+            theta_val = abs(float(action.get("theta", 0.0)))
+            dphi_deg += 12.0 * spin_mag + 0.3 * theta_val
+            if is_detour:
+                dphi_deg *= 1.4
+            dphi_deg = max(dphi_deg, 1.0)
+
+            cue_dir, cue_len = unit_vec(aim_xy - cue_xy)
+            obj_dir, obj_len = unit_vec(pocket_xy - ball_xy)
+            vec_cb = ball_xy - cue_xy
+            vec_bp = pocket_xy - ball_xy
+            dist_cb = float(np.linalg.norm(vec_cb))
+            dist_bp = float(np.linalg.norm(vec_bp))
+            cut_angle_deg = 0.0
+            if dist_cb > 1e-6 and dist_bp > 1e-6:
+                cos_cut = float(np.dot(vec_cb, vec_bp) / (dist_cb * dist_bp))
+                cos_cut = max(-1.0, min(1.0, cos_cut))
+                cut_angle_deg = float(math.degrees(math.acos(cos_cut)))
+
+            phi_deg = float(action.get("phi", 0.0)) % 360.0
+            cue_risk = sector_risk(
+                cue_xy, phi_deg, cue_len, action.get("V0", 0.0), v0_std, dphi_deg, black_xy
+            )
+
+            throw_deg = min(25.0, 0.25 * cut_angle_deg + 8.0 * spin_mag)
+            obj_phi = float(math.degrees(math.atan2(obj_dir[1], obj_dir[0])) % 360.0)
+            obj_risk = sector_risk(
+                ball_xy,
+                obj_phi,
+                obj_len,
+                action.get("V0", 0.0),
+                v0_std,
+                max(dphi_deg + throw_deg, 2.0),
+                black_xy,
+            )
+
+            cross_z = cue_dir[0] * obj_dir[1] - cue_dir[1] * obj_dir[0]
+            side = -math.copysign(1.0, cross_z) if abs(cross_z) > 1e-6 else 1.0
+            stun_dir = rot90(obj_dir) * side
+            b_val = float(action.get("b", 0.0))
+            follow_ratio = max(-1.0, min(1.0, b_val / 0.2))
+            if cut_angle_deg < 5.0:
+                base_after_dir = obj_dir if b_val >= 0.0 else -obj_dir
+            else:
+                if follow_ratio >= 0.0:
+                    mix = (1.0 - follow_ratio) * stun_dir + follow_ratio * obj_dir
+                else:
+                    mix = (1.0 - abs(follow_ratio)) * stun_dir + abs(follow_ratio) * (-obj_dir)
+                base_after_dir, _ = unit_vec(mix)
+
+            after_phi = float(math.degrees(math.atan2(base_after_dir[1], base_after_dir[0])) % 360.0)
+            base_after_len = max(ball_radius * 6.0, 0.35 * cue_len)
+            speed_scale = max(0.4, min(1.8, float(action.get("V0", 0.0)) / 3.0))
+            spin_scale = 1.0 + 0.8 * abs(b_val)
+            cue_after_len = base_after_len * speed_scale * spin_scale
+            max_len = 0.7 * min(table.w, table.l)
+            cue_after_len = min(cue_after_len, max_len)
+            dphi_after = dphi_deg + 6.0 * abs(float(action.get("a", 0.0))) + 0.4 * theta_val
+            cue_after_risk = sector_risk(
+                ball_xy,
+                after_phi,
+                cue_after_len,
+                action.get("V0", 0.0),
+                v0_std,
+                max(dphi_after, 2.0),
+                black_xy,
+            )
+
+            d_black_ball = float(np.linalg.norm(black_xy - ball_xy))
+            near_ball_risk = math.exp(-0.5 * (d_black_ball / max(2.5 * ball_radius, 1e-4)) ** 2)
+            d_black_aim = float(np.linalg.norm(black_xy - aim_xy))
+            near_aim_risk = math.exp(-0.5 * (d_black_aim / max(2.2 * ball_radius, 1e-4)) ** 2)
+            d_black_pocket = float(np.linalg.norm(black_xy - pocket_xy))
+            pocket_risk = math.exp(-0.5 * (d_black_pocket / max(1.8 * ball_radius, 1e-4)) ** 2)
+
+            risk = 1.0 - (
+                (1.0 - cue_risk)
+                * (1.0 - obj_risk)
+                * (1.0 - cue_after_risk)
+                * (1.0 - near_ball_risk)
+                * (1.0 - near_aim_risk)
+                * (1.0 - pocket_risk)
+            )
+            penalty = -500.0 * risk
+            return float(max(-500.0, min(0.0, penalty)))
 
 
         # ------- 单弯点 detour 优化：在几何上寻找最佳弯点 X -------
@@ -1122,7 +1288,7 @@ class NewAgent(Agent):
             return []
 
         pair_infos.sort(key=lambda x: x[0])
-        pair_budget = min(len(pair_infos), max(6, int(num_candidates * 0.7)))
+        pair_budget = min(len(pair_infos), max(6, int(num_candidates * 1.0)))
         selected_pairs = pair_infos[:pair_budget]
 
         # --- offensive candidates: geom + detour ---
@@ -1145,9 +1311,12 @@ class NewAgent(Agent):
                     "b": b_val,
                     "candidate_type": f"geom_{geom_tag}",
                 }
+                action["prior_penalty"] = prior_penalty_for_action(
+                    action, ball_xy, pocket_xy, aim_xy, is_detour=False
+                )
                 candidates.append((base_cost, action))
 
-            add_templated_geom_actions(base_phi_deg, base_v0, base_cost)
+            add_templated_geom_actions(base_phi_deg, base_v0, base_cost, ball_xy, pocket_xy, aim_xy)
 
             if blocked_any:
                 detour_for_pair = plan_detour_actions_for_pair(
@@ -1159,6 +1328,9 @@ class NewAgent(Agent):
                     max_actions_per_pair=3,
                 )
                 for cost_like, act in detour_for_pair:
+                    act["prior_penalty"] = prior_penalty_for_action(
+                        act, ball_xy, pocket_xy, aim_xy, is_detour=True
+                    )
                     detour_candidates.append((base_cost + 0.1 + cost_like, act))
         candidates.sort(key=lambda x: x[0])
         detour_candidates.sort(key=lambda x: x[0])
@@ -1190,6 +1362,7 @@ class NewAgent(Agent):
         while used < num_candidates:
             rand_act = self._random_action()
             rand_act["candidate_type"] = "random"
+            rand_act["prior_penalty"] = 0.0
             final_candidates.append(rand_act)
             used += 1
 

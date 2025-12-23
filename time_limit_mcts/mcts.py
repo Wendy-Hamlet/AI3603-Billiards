@@ -42,31 +42,19 @@ class MCTSNode:
 
 class CandidateStats:
     """
-    记录单个候选动作的蒙特卡洛统计量：采样次数、均值和方差（Welford 在线算法）。
+    记录单个候选动作的蒙特卡洛统计量：采样次数与均值。
     """
 
     def __init__(self, action: dict):
         self.action = action
         self.n: int = 0
         self.mean: float = 0.0
-        self.M2: float = 0.0  # 用于方差计算
+        self.prior_penalty: float = float(action.get("prior_penalty", 0.0))
 
     def update(self, reward: float):
         self.n += 1
         delta = reward - self.mean
         self.mean += delta / self.n
-        delta2 = reward - self.mean
-        self.M2 += delta * delta2
-
-    @property
-    def variance(self) -> float:
-        if self.n <= 1:
-            return 0.0
-        return max(self.M2 / (self.n - 1), 0.0)
-
-    @property
-    def std(self) -> float:
-        return math.sqrt(self.variance)
 
 
 class MCTSSolver:
@@ -77,7 +65,7 @@ class MCTSSolver:
     - 对每个候选动作进行多次带噪声仿真
     - 使用 UCB 在候选之间分配仿真预算
     - 所有仿真阶段都通过 ThreadPoolExecutor 批量并行执行
-    - 最终按 mean - λ * std（λ = risk_aversion）选出相对稳定的动作
+    - 最终按 mean（叠加先验惩罚 prior_penalty）选出动作
     """
 
     def __init__(
@@ -96,7 +84,7 @@ class MCTSSolver:
         risk_spin_softcap: float = 0.12,
         risk_v0_weight: float = 0.4,
         risk_spin_weight: float = 8.0,
-        risk_aversion: float = 0.4,   # 最终打分: mean - λ * std
+        risk_aversion: float = 0.4,   # 保留参数，方差项已移除
         num_workers=None,             # CPU并行线程数
     ):
         self.pbounds = pbounds
@@ -149,14 +137,17 @@ class MCTSSolver:
         - 阶段1：初始均匀探索，每个动作至少评估若干次（若预算允许），用线程池并行执行
           初始每个动作的评估次数大致为: init_per_action ≈ num_simulations / (2 * num_candidates)
         - 阶段2：剩余预算通过 UCB 分配，按 batch 并行评估
-        - 最终按 mean - risk_aversion * std 选择一个动作
+        - 最终按 mean（叠加 prior_penalty）选择一个动作
         """
         self.last_simulations_done = 0
         num_actions = len(candidate_actions)
         if num_actions == 0:
             return None
         if self.num_simulations <= 0:
-            return random.choice(candidate_actions)
+            return max(
+                candidate_actions,
+                key=lambda act: float(act.get("prior_penalty", 0.0)),
+            )
 
         deadline = None
         if time_limit_s is not None:
@@ -199,7 +190,7 @@ class MCTSSolver:
         if total_budget < num_actions:
             # 预算太少，只能让部分动作各打一杆
             init_indices = list(range(num_actions))
-            random.shuffle(init_indices)
+            init_indices.sort(key=lambda i: stats_list[i].prior_penalty, reverse=True)
             init_indices = init_indices[:total_budget]
             executor = ThreadPoolExecutor(max_workers=self.num_workers)
             try:
@@ -336,7 +327,7 @@ class MCTSSolver:
                 else:
                     executor.shutdown(wait=True)
         # -------------------------------
-        # 阶段3：根据 mean - λ * std 选择最终动作
+        # 阶段3：根据 mean（叠加 prior_penalty）选择最终动作
         # -------------------------------
         self.last_simulations_done = budget_used
         best_idx = None
@@ -344,9 +335,7 @@ class MCTSSolver:
         for i, s in enumerate(stats_list):
             if s.n == 0:
                 continue
-            # 对低采样的动作设置std下限，避免单次幸运样本占优
-            effective_std = s.std if s.n >= 2 else max(50.0, s.std)
-            score = s.mean - self.risk_aversion * effective_std
+            score = s.mean + s.prior_penalty
             if score > best_score:
                 best_score = score
                 best_idx = i
@@ -373,9 +362,9 @@ class MCTSSolver:
         for i, s in enumerate(stats_list):
             vcount = 0 if virtual_counts is None else virtual_counts[i]
             n_eff = s.n + vcount
-            if n_eff == 0:
-                return i  # 优先给没被评估过的动作一次机会
-            mean = s.mean
+            if n_eff <= 0:
+                n_eff = 1
+            mean = s.mean + s.prior_penalty
             ucb = mean + self.exploration_c * math.sqrt(
                 math.log(max(total_n, 1) + 1.0) / n_eff
             )
