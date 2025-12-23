@@ -504,11 +504,11 @@ class NewAgent(Agent):
         super().__init__()
         self.time_limit_s = float(time_limit_s)
         self._decision_safety_margin_s = 0.05
-        self.total_time_s = 90.0
+        self.total_time_s = 87.0
         self.remaining_time_s = self.total_time_s
         self.shot_count = 0
         self.per_shot_time_s = 6.0
-        self.fast_time_s = 1.0
+        self.fast_time_s = 2.0
         self._rack_positions = None
         self._rack_broken = False
         self.num_candidates = num_candidates
@@ -567,7 +567,7 @@ class NewAgent(Agent):
 
             remaining_total = max(0.0, self.remaining_time_s)
             if remaining_total <= 0.0:
-                action = self._random_action()
+                action = self._safe_fallback_action(balls, my_targets)
                 self._log_action(action, 0, start_ts)
                 return action
 
@@ -582,11 +582,15 @@ class NewAgent(Agent):
             elif remaining_total >= 16.0:
                 time_budget = min(self.per_shot_time_s, remaining_total)
             elif remaining_total > 10.0:
-                time_budget = max(0.0, remaining_total - 10.0)
+                time_budget = max(3.0, remaining_total - 10.0)
             else:
                 time_budget = min(self.fast_time_s, remaining_total)
 
-            fast_mode = remaining_total <= 10.0
+            fast_mode = remaining_total <= 10.0 or (
+                remaining_total > 10.0 and (remaining_total - 10.0) < 3.0
+            )
+            if fast_mode:
+                time_budget = min(self.fast_time_s, remaining_total)
             num_candidates = self.num_candidates
             if fast_mode:
                 num_candidates = max(1, int(self.num_candidates * 0.5))
@@ -720,6 +724,35 @@ class NewAgent(Agent):
             "a": 0.0,
             "b": 0.0,
             "candidate_type": "opening_safe",
+        }
+
+    def _safe_fallback_action(self, balls, my_targets):
+        cue_ball = balls.get("cue", None)
+        if cue_ball is None:
+            return self._random_action()
+        live_targets = [
+            bid for bid in my_targets
+            if bid in balls and getattr(balls[bid].state, "s", 0) != 4
+        ]
+        if not live_targets:
+            return self._random_action()
+        target_id = random.choice(live_targets)
+        cue_xy = np.array(cue_ball.state.rvw[0], dtype=float)[:2]
+        target_xy = np.array(balls[target_id].state.rvw[0], dtype=float)[:2]
+        vec = target_xy - cue_xy
+        dist = float(np.linalg.norm(vec))
+        if dist < 1e-6:
+            phi = float(random.uniform(0.0, 360.0))
+        else:
+            phi = float(math.degrees(math.atan2(vec[1], vec[0])) % 360.0)
+        v0 = float(np.clip(max(0.6, dist * 0.9), 0.5, 1.4))
+        return {
+            "V0": v0,
+            "phi": phi,
+            "theta": 1.0,
+            "a": 0.0,
+            "b": 0.0,
+            "candidate_type": "safe_fallback",
         }
 
     def _generate_candidate_actions(self, balls, my_targets, table, num_candidates: int):
@@ -951,7 +984,7 @@ class NewAgent(Agent):
                 return obj, min_clear, X
 
             # --------- 随机多启动搜索 ---------
-            num_samples = 60  # 全局采样次数
+            num_samples = 80  # 全局采样次数
             best_list = []     # 保存若干最优 (obj, min_clear, t, s, X)
 
             for i in range(num_samples):
