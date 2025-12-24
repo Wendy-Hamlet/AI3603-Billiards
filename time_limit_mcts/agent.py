@@ -16,7 +16,6 @@ import copy
 import os
 from datetime import datetime
 import random
-import time
 import signal
 # from poolagent.pool import Pool as CuetipEnv, State as CuetipState
 # from poolagent import FunctionAgent
@@ -25,6 +24,7 @@ from bayes_opt import BayesianOptimization, SequentialDomainReductionTransformer
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern
 from mcts import MCTSSolver
+import time
 
 # ============ 超时安全模拟机制 ============
 class SimulationTimeoutError(Exception):
@@ -82,7 +82,7 @@ def analyze_shot_for_reward(shot: pt.System, last_state: dict, player_targets: l
     返回：
         float: 奖励分数
             +50/球（己方进球）, +100（合法黑8）, +10（合法无进球）
-            -100（白球进袋）, -150（非法黑8/白球+黑8）, -30（首球/碰库犯规）
+            -100（白球进袋）, -500（非法黑8/白球+黑8）, -30（首球/碰库犯规）
     
     规则核心：
         - 清台前：player_targets = ['1'-'7'] 或 ['9'-'15']，黑8不属于任何人
@@ -141,32 +141,25 @@ def analyze_shot_for_reward(shot: pt.System, last_state: dict, player_targets: l
     if len(new_pocketed) == 0 and first_contact_ball_id is not None and (not cue_hit_cushion) and (not target_hit_cushion):
         foul_no_rail = True
         
-    # 4. 计算奖励分数
+    # 计算奖励分数
     score = 0
     
-    # 白球进袋处理
     if cue_pocketed and eight_pocketed:
-        score -= 150  # 白球+黑8同时进袋，严重犯规
+        score -= 500
     elif cue_pocketed:
-        score -= 100  # 白球进袋
+        score -= 100
     elif eight_pocketed:
-        # 黑8进袋：只有清台后（player_targets == ['8']）才合法
-        if player_targets == ['8']:
-            score += 100  # 合法打进黑8
-        else:
-            score -= 150  # 清台前误打黑8，判负
+        is_targeting_eight_ball_legally = (len(player_targets) == 1 and player_targets[0] == "8")
+        score += 150 if is_targeting_eight_ball_legally else -500
             
-    # 首球犯规和碰库犯规
     if foul_first_hit:
         score -= 30
     if foul_no_rail:
         score -= 30
         
-    # 进球得分（own_pocketed 已根据 player_targets 正确分类）
     score += len(own_pocketed) * 50
     score -= len(enemy_pocketed) * 20
     
-    # 合法无进球小奖励
     if score == 0 and not cue_pocketed and not eight_pocketed and not foul_first_hit and not foul_no_rail:
         score = 10
         
@@ -205,181 +198,172 @@ class Agent():
 
 
 class BasicAgent(Agent):
-    """基于贝叶斯优化的智能 Agent"""
-    
-    def __init__(self, target_balls=None):
-        """初始化 Agent
-        
-        参数：
-            target_balls: 保留参数，暂未使用
-        """
+    def __init__(self,
+                 n_simulations=50,       # 仿真次数
+                 c_puct=1.414):          # 探索系数
         super().__init__()
+        self.n_simulations = n_simulations
+        self.c_puct = c_puct
+        self.ball_radius = 0.028575
         
-        # 搜索空间
-        self.pbounds = {
-            'V0': (0.5, 8.0),
-            'phi': (0, 360),
-            'theta': (0, 90), 
-            'a': (-0.5, 0.5),
-            'b': (-0.5, 0.5)
+        # 定义噪声水平 (与 poolenv 保持一致或略大)
+        self.sim_noise = {
+            'V0': 0.1, 'phi': 0.15, 'theta': 0.1, 'a': 0.005, 'b': 0.005
         }
-        
-        # 优化参数
-        self.INITIAL_SEARCH = 20
-        self.OPT_SEARCH = 10
-        self.ALPHA = 1e-2
-        
-        # 模拟噪声（可调整以改变训练难度）
-        self.noise_std = {
-            'V0': 0.1,
-            'phi': 0.1,
-            'theta': 0.1,
-            'a': 0.003,
-            'b': 0.003
-        }
-        self.enable_noise = False
-        
-        print("BasicAgent (Smart, pooltool-native) 已初始化。")
 
-    
-    def _create_optimizer(self, reward_function, seed):
-        """创建贝叶斯优化器
-        
-        参数：
-            reward_function: 目标函数，(V0, phi, theta, a, b) -> score
-            seed: 随机种子
-        
-        返回：
-            BayesianOptimization对象
+    def _calc_angle_degrees(self, v):
+        angle = math.degrees(math.atan2(v[1], v[0]))
+        return angle % 360
+
+    def _get_ghost_ball_target(self, cue_pos, obj_pos, pocket_pos):
+        vec_obj_to_pocket = np.array(pocket_pos) - np.array(obj_pos)
+        dist_obj_to_pocket = np.linalg.norm(vec_obj_to_pocket)
+        if dist_obj_to_pocket == 0: return 0, 0
+        unit_vec = vec_obj_to_pocket / dist_obj_to_pocket
+        ghost_pos = np.array(obj_pos) - unit_vec * (2 * self.ball_radius)
+        vec_cue_to_ghost = ghost_pos - np.array(cue_pos)
+        dist_cue_to_ghost = np.linalg.norm(vec_cue_to_ghost)
+        phi = self._calc_angle_degrees(vec_cue_to_ghost)
+        return phi, dist_cue_to_ghost
+
+    def generate_heuristic_actions(self, balls, my_targets, table):
         """
-        gpr = GaussianProcessRegressor(
-            kernel=Matern(nu=2.5),
-            alpha=self.ALPHA,
-            n_restarts_optimizer=10,
-            random_state=seed
-        )
+        生成候选动作列表
+        """
+        actions = []
         
-        bounds_transformer = SequentialDomainReductionTransformer(
-            gamma_osc=0.8,
-            gamma_pan=1.0
-        )
-        
-        optimizer = BayesianOptimization(
-            f=reward_function,
-            pbounds=self.pbounds,
-            random_state=seed,
-            verbose=0,
-            bounds_transformer=bounds_transformer
-        )
-        optimizer._gp = gpr
-        
-        return optimizer
+        cue_ball = balls.get('cue')
+        if not cue_ball: return [self._random_action()]
+        cue_pos = cue_ball.state.rvw[0]
 
+        # 获取所有目标球的ID
+        target_ids = [bid for bid in my_targets if balls[bid].state.s != 4]
+        
+        # 如果没有目标球了（理论上外部会处理转为8号，这里兜底）
+        if not target_ids:
+            target_ids = ['8']
+
+        # 遍历每一个目标球
+        for tid in target_ids:
+            obj_ball = balls[tid]
+            obj_pos = obj_ball.state.rvw[0]
+
+            # 遍历每一个袋口
+            for pocket_id, pocket in table.pockets.items():
+                pocket_pos = pocket.center
+
+                # 1. 计算理论进球角度
+                phi_ideal, dist = self._get_ghost_ball_target(cue_pos, obj_pos, pocket_pos)
+
+                # 2. 根据距离简单的估算力度 (距离越远力度越大，基础力度2.0)
+                v_base = 1.5 + dist * 1.5
+                v_base = np.clip(v_base, 1.0, 6.0)
+
+                # 3. 生成几个变种动作加入候选池
+                # 变种1：精准一击
+                actions.append({
+                    'V0': v_base, 'phi': phi_ideal, 'theta': 0, 'a': 0, 'b': 0
+                })
+                # 变种2：力度稍大
+                actions.append({
+                    'V0': min(v_base + 1.5, 7.5), 'phi': phi_ideal, 'theta': 0, 'a': 0, 'b': 0
+                })
+                # 变种3：角度微调 (左右偏移 0.5 度，应对噪声)
+                actions.append({
+                    'V0': v_base, 'phi': (phi_ideal + 0.5) % 360, 'theta': 0, 'a': 0, 'b': 0
+                })
+                actions.append({
+                    'V0': v_base, 'phi': (phi_ideal - 0.5) % 360, 'theta': 0, 'a': 0, 'b': 0
+                })
+
+        # 如果通过启发式没有生成任何动作（极罕见），补充随机动作
+        if len(actions) == 0:
+            for _ in range(5):
+                actions.append(self._random_action())
+        
+        # 随机打乱顺序
+        random.shuffle(actions)
+        return actions[:30]
+
+    def simulate_action(self, balls, table, action):
+        """
+        [修改点1] 执行带噪声的物理仿真
+        让 Agent 意识到由于误差的存在，某些“极限球”是不可打的
+        """
+        sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+        sim_table = copy.deepcopy(table)
+        cue = pt.Cue(cue_ball_id="cue")
+        shot = pt.System(table=sim_table, balls=sim_balls, cue=cue)
+        
+        try:
+            # --- 注入高斯噪声 ---
+            noisy_V0 = np.clip(action['V0'] + np.random.normal(0, self.sim_noise['V0']), 0.5, 8.0)
+            noisy_phi = (action['phi'] + np.random.normal(0, self.sim_noise['phi'])) % 360
+            noisy_theta = np.clip(action['theta'] + np.random.normal(0, self.sim_noise['theta']), 0, 90)
+            noisy_a = np.clip(action['a'] + np.random.normal(0, self.sim_noise['a']), -0.5, 0.5)
+            noisy_b = np.clip(action['b'] + np.random.normal(0, self.sim_noise['b']), -0.5, 0.5)
+
+            cue.set_state(V0=noisy_V0, phi=noisy_phi, theta=noisy_theta, a=noisy_a, b=noisy_b)
+            pt.simulate(shot, inplace=True)
+            return shot
+        except Exception:
+            return None
 
     def decision(self, balls=None, my_targets=None, table=None):
-        """使用贝叶斯优化搜索最佳击球参数
+        if balls is None: return self._random_action()
         
-        参数：
-            balls: 球状态字典，{ball_id: Ball}
-            my_targets: 目标球ID列表，['1', '2', ...]
-            table: 球桌对象
+        # 预处理
+        remaining = [bid for bid in my_targets if balls[bid].state.s != 4]
+        if len(remaining) == 0: my_targets = ["8"]
+        last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+
+        # 生成候选动作
+        candidate_actions = self.generate_heuristic_actions(balls, my_targets, table)
+        n_candidates = len(candidate_actions)
         
-        返回：
-            dict: 击球动作 {'V0', 'phi', 'theta', 'a', 'b'}
-                失败时返回随机动作
-        """
-        if balls is None:
-            print(f"[BasicAgent] Agent decision函数未收到balls关键信息，使用随机动作。")
-            return self._random_action()
-        try:
+        N = np.zeros(n_candidates)
+        Q = np.zeros(n_candidates)
+        
+        # MCTS 循环
+        for i in range(self.n_simulations):
+            # Selection (UCB)
+            if i < n_candidates:
+                idx = i
+            else:
+                total_n = np.sum(N)
+                # 使用归一化后的 Q 进行计算
+                ucb_values = (Q / (N + 1e-6)) + self.c_puct * np.sqrt(np.log(total_n + 1) / (N + 1e-6))
+                idx = np.argmax(ucb_values)
             
-            # 保存一个击球前的状态快照，用于对比
-            last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+            # Simulation (带噪声)
+            shot = self.simulate_action(balls, table, candidate_actions[idx])
 
-            remaining_own = [bid for bid in my_targets if balls[bid].state.s != 4]
-            if len(remaining_own) == 0:
-                my_targets = ["8"]
-                print("[BasicAgent] 我的目标球已全部清空，自动切换目标为：8号球")
-
-            # 1.动态创建“奖励函数” (Wrapper)
-            # 贝叶斯优化器会调用此函数，并传入参数
-            def reward_fn_wrapper(V0, phi, theta, a, b):
-                # 创建一个用于模拟的沙盒系统
-                sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
-                sim_table = copy.deepcopy(table)
-                cue = pt.Cue(cue_ball_id="cue")
-
-                shot = pt.System(table=sim_table, balls=sim_balls, cue=cue)
-                
-                try:
-                    if self.enable_noise:
-                        V0_noisy = V0 + np.random.normal(0, self.noise_std['V0'])
-                        phi_noisy = phi + np.random.normal(0, self.noise_std['phi'])
-                        theta_noisy = theta + np.random.normal(0, self.noise_std['theta'])
-                        a_noisy = a + np.random.normal(0, self.noise_std['a'])
-                        b_noisy = b + np.random.normal(0, self.noise_std['b'])
-                        
-                        V0_noisy = np.clip(V0_noisy, 0.5, 8.0)
-                        phi_noisy = phi_noisy % 360
-                        theta_noisy = np.clip(theta_noisy, 0, 90)
-                        a_noisy = np.clip(a_noisy, -0.5, 0.5)
-                        b_noisy = np.clip(b_noisy, -0.5, 0.5)
-                        
-                        shot.cue.set_state(V0=V0_noisy, phi=phi_noisy, theta=theta_noisy, a=a_noisy, b=b_noisy)
-                    else:
-                        shot.cue.set_state(V0=V0, phi=phi, theta=theta, a=a, b=b)
-                    
-                    # 关键：使用带超时保护的物理模拟（3秒上限）
-                    if not simulate_with_timeout(shot, timeout=3):
-                        return 0  # 超时是物理引擎问题，不惩罚agent
-                except Exception as e:
-                    # 模拟失败，给予极大惩罚
-                    return -500
-                
-                # 使用我们的“裁判”来打分
-                score = analyze_shot_for_reward(
-                    shot=shot,
-                    last_state=last_state_snapshot,
-                    player_targets=my_targets
-                )
-
-
-                return score
-
-            print(f"[BasicAgent] 正在为 Player (targets: {my_targets}) 搜索最佳击球...")
+            # Evaluation
+            if shot is None:
+                raw_reward = -500.0
+            else:
+                raw_reward = analyze_shot_for_reward(shot, last_state_snapshot, my_targets)
             
-            seed = np.random.randint(1e6)
-            optimizer = self._create_optimizer(reward_fn_wrapper, seed)
-            optimizer.maximize(
-                init_points=self.INITIAL_SEARCH,
-                n_iter=self.OPT_SEARCH
-            )
-            
-            best_result = optimizer.max
-            best_params = best_result['params']
-            best_score = best_result['target']
+            # 映射公式: (val - min) / (max - min)
+            normalized_reward = (raw_reward - (-500)) / 650.0
+            # 截断一下防止越界
+            normalized_reward = np.clip(normalized_reward, 0.0, 1.0)
 
-            if best_score < 10:
-                print(f"[BasicAgent] 未找到好的方案 (最高分: {best_score:.2f})。使用随机动作。")
-                return self._random_action()
-            action = {
-                'V0': float(best_params['V0']),
-                'phi': float(best_params['phi']),
-                'theta': float(best_params['theta']),
-                'a': float(best_params['a']),
-                'b': float(best_params['b']),
-            }
+            # Backpropagation
+            N[idx] += 1
+            Q[idx] += normalized_reward # 累加归一化后的分数
 
-            print(f"[BasicAgent] 决策 (得分: {best_score:.2f}): "
-                  f"V0={action['V0']:.2f}, phi={action['phi']:.2f}, "
-                  f"θ={action['theta']:.2f}, a={action['a']:.3f}, b={action['b']:.3f}")
-            return action
+        # Final Decision
+        # 选平均分最高的 (Robust Child)
+        avg_rewards = Q / (N + 1e-6)
+        best_idx = np.argmax(avg_rewards)
+        best_action = candidate_actions[best_idx]
+        
+        # 简单打印一下当前最好的预测胜率
+        print(f"[BasicAgent] Best Avg Score: {avg_rewards[best_idx]:.3f} (Sims: {self.n_simulations})")
+        
+        return best_action
 
-        except Exception as e:
-            print(f"[BasicAgent] 决策时发生严重错误，使用随机动作。原因: {e}")
-            import traceback
-            traceback.print_exc()
-            return self._random_action()
 
 def analyze_shot_for_reward_mcts(
     shot: pt.System,
@@ -493,7 +477,7 @@ class NewAgent(Agent):
     def __init__(
         self,
         num_candidates: int = 50,
-        num_simulations: int = 180,
+        num_simulations: int = 150,
         time_limit_s: float = 3.0,
         max_depth: int = 2,           # 保留参数，占位
         exploration_c: float = 1.4,     
@@ -504,7 +488,7 @@ class NewAgent(Agent):
         super().__init__()
         self.time_limit_s = float(time_limit_s)
         self._decision_safety_margin_s = 0.05
-        self.total_time_s = 87.0
+        self.total_time_s = 85.0
         self.remaining_time_s = self.total_time_s
         self.shot_count = 0
         self.per_shot_time_s = 6.0
@@ -537,8 +521,8 @@ class NewAgent(Agent):
             noise_std=self.noise_std,
             risk_aversion=risk_aversion,
             num_workers=num_workers,
-        )
 
+        )
     def reset_budget(self):
         self.remaining_time_s = self.total_time_s
         self.shot_count = 0
@@ -565,15 +549,15 @@ class NewAgent(Agent):
             ]
             print(f"[NewAgent] remaining targets: {remaining_report}")
 
-            remaining_total = max(0.0, self.remaining_time_s)
-            if remaining_total <= 0.0:
-                action = self._safe_fallback_action(balls, my_targets)
-                self._log_action(action, 0, start_ts)
-                return action
-
             if self._is_unbroken_rack(balls, table):
                 action = self._opening_safe_action(balls, my_targets)
                 consume_time = False
+                self._log_action(action, 0, start_ts)
+                return action
+
+            remaining_total = max(0.0, self.remaining_time_s)
+            if remaining_total <= 0.0:
+                action = self._safe_fallback_action(balls, my_targets, table)
                 self._log_action(action, 0, start_ts)
                 return action
 
@@ -596,7 +580,7 @@ class NewAgent(Agent):
                 num_candidates = max(1, int(self.num_candidates * 0.5))
 
             candidates = self._generate_candidate_actions(
-                balls, my_targets, table, num_candidates
+                balls, my_targets, table, num_candidates, detour_penalty=fast_mode
             )
             if not candidates:
                 action = self._random_action()
@@ -607,8 +591,9 @@ class NewAgent(Agent):
             deadline = time.perf_counter() + time_budget
             remaining = deadline - time.perf_counter() - self._decision_safety_margin_s
             if remaining <= 0.05:
-                self._log_action(fallback_action, 0, start_ts)
-                return fallback_action
+                action = self._safe_fallback_action(balls, my_targets, table)
+                self._log_action(action, 0, start_ts)
+                return action
 
             action = self.mcts.search(
                 balls=balls,
@@ -643,8 +628,8 @@ class NewAgent(Agent):
             f"[NewAgent] action({ctype}, sims={sims_done}, remain={remaining_preview:.2f}s): "
             f"V0={action['V0']:.2f}, phi={action['phi']:.2f}, "
             f"theta={action['theta']:.2f}, a={action['a']:.3f}, b={action['b']:.3f}"
-        )
 
+        )
     def _is_unbroken_rack(self, balls, table, tol: float = 5e-3) -> bool:
         if self._rack_broken:
             return False
@@ -726,36 +711,48 @@ class NewAgent(Agent):
             "candidate_type": "opening_safe",
         }
 
-    def _safe_fallback_action(self, balls, my_targets):
-        cue_ball = balls.get("cue", None)
-        if cue_ball is None:
+    def _safe_fallback_action(self, balls, my_targets, table):
+        # final_mode: geom-only + cheap safety score (cue_risk + co_pocket_risk)
+        if balls is None or my_targets is None or table is None:
             return self._random_action()
-        live_targets = [
-            bid for bid in my_targets
-            if bid in balls and getattr(balls[bid].state, "s", 0) != 4
+        num_candidates = max(1, int(self.num_candidates * 0.5))
+        candidates = self._generate_candidate_actions(
+            balls,
+            my_targets,
+            table,
+            num_candidates,
+            geom_only=True,
+            detour_penalty=False,
+        )
+        if not candidates:
+            return self._random_action()
+        geom_candidates = [
+            act for act in candidates
+            if str(act.get("candidate_type", "")).startswith("geom_")
         ]
-        if not live_targets:
+        if not geom_candidates:
             return self._random_action()
-        target_id = random.choice(live_targets)
-        cue_xy = np.array(cue_ball.state.rvw[0], dtype=float)[:2]
-        target_xy = np.array(balls[target_id].state.rvw[0], dtype=float)[:2]
-        vec = target_xy - cue_xy
-        dist = float(np.linalg.norm(vec))
-        if dist < 1e-6:
-            phi = float(random.uniform(0.0, 360.0))
-        else:
-            phi = float(math.degrees(math.atan2(vec[1], vec[0])) % 360.0)
-        v0 = float(np.clip(max(0.6, dist * 0.9), 0.5, 1.4))
-        return {
-            "V0": v0,
-            "phi": phi,
-            "theta": 1.0,
-            "a": 0.0,
-            "b": 0.0,
-            "candidate_type": "safe_fallback",
-        }
+        best_action = None
+        best_score = -1e9
+        for action in geom_candidates:
+            cue_risk = float(action.get("prior_cue_risk", 0.0))
+            co_pocket_risk = float(action.get("prior_co_pocket_risk", 0.0))
+            combined_risk = 1.0 - (1.0 - cue_risk) * (1.0 - co_pocket_risk)
+            score = 1.0 - combined_risk
+            if score > best_score:
+                best_score = score
+                best_action = action
+        return best_action or self._random_action()
 
-    def _generate_candidate_actions(self, balls, my_targets, table, num_candidates: int):
+    def _generate_candidate_actions(
+        self,
+        balls,
+        my_targets,
+        table,
+        num_candidates: int,
+        geom_only: bool = False,
+        detour_penalty: bool = True,
+    ):
         """
         生成候选动作：
         - geom: 几何直线进球
@@ -771,6 +768,11 @@ class NewAgent(Agent):
         cue_xy = cue_pos[:2]
         ball_radius = 0.028575
         clearance = ball_radius * 2.1   # 安全间隔（中心线与球心的最小距离）
+        block_clearance = clearance * 1.6
+        near_target_r = ball_radius * 3.2
+        near_aim_r = ball_radius * 3.0
+        near_line_band = max(block_clearance, ball_radius * 3.6)
+        near_t_min = 0.6
         angle_offsets = [-4.0, -2.0, 0.0, 2.0, 4.0]
         own_set = set(my_targets)
 
@@ -818,12 +820,47 @@ class NewAgent(Agent):
                     })
             return sorted(blockers, key=lambda x: x["along"])
 
-        def has_blocker_on_segment(p_start: np.ndarray, p_end: np.ndarray, allow_ids=None) -> bool:
+        def find_near_target_blockers(bid, ball_xy, aim_xy, dist_ca):
+            """
+            找找目标球附近的阻挡球，用于触发 detour
+            """
+            blockers = []
+            if dist_ca < 1e-6:
+                return blockers
+            for oid, ob in balls.items():
+                if oid in ("cue", bid):
+                    continue
+                if getattr(ob.state, "s", 0) == 4:
+                    continue
+                pos_xy = np.array(ob.state.rvw[0], dtype=float)[:2]
+                d_target = float(np.linalg.norm(pos_xy - ball_xy))
+                d_aim = float(np.linalg.norm(pos_xy - aim_xy))
+                if d_target > near_target_r and d_aim > near_aim_r:
+                    continue
+                dist, t, side = segment_distance(cue_xy, aim_xy, pos_xy)
+                if t < near_t_min:
+                    continue
+                if dist > near_line_band:
+                    continue
+                if abs(side) < 1e-6:
+                    continue
+                blockers.append({
+                    "id": oid,
+                    "along": float(dist_ca * t),
+                    "dist_to_line": dist,
+                    "dist_to_target": d_target,
+                    "dist_to_aim": d_aim,
+                    "side": side,
+                })
+            return blockers
+
+        def has_blocker_on_segment(p_start: np.ndarray, p_end: np.ndarray, allow_ids=None, threshold: float = None) -> bool:
             """
             segment_distance 判定线段上是否有阻挡。
             allow_ids: 允许被碰到的球（如目标球），其他存活球视为阻挡。
             """
             allow_ids = allow_ids or set()
+            thresh = clearance if threshold is None else float(threshold)
             for oid, ob in balls.items():
                 if oid == "cue" or getattr(ob.state, "s", 0) == 4:
                     continue
@@ -831,10 +868,30 @@ class NewAgent(Agent):
                     continue
                 pos_xy = np.array(ob.state.rvw[0], dtype=float)[:2]
                 dist, t, _ = segment_distance(p_start, p_end, pos_xy)
-                if 0.0 < t < 1.0 and dist < clearance:
+                if 0.0 < t < 1.0 and dist < thresh:
                     return True
             return False
 
+
+        def compute_prefer_side(line_blockers, near_blockers):
+            score = 0.0
+            for blk in line_blockers:
+                side = float(blk.get("side", 0.0))
+                if abs(side) < 1e-6:
+                    continue
+                dist = float(blk.get("dist_to_line", clearance))
+                dist = max(ball_radius, dist)
+                score -= side * (ball_radius / dist)
+            for blk in near_blockers:
+                side = float(blk.get("side", 0.0))
+                if abs(side) < 1e-6:
+                    continue
+                dist = float(blk.get("dist_to_target", clearance))
+                dist = max(ball_radius, dist)
+                score -= side * 1.4 * (ball_radius / dist)
+            if abs(score) < 0.15:
+                return 0.0
+            return math.copysign(1.0, score)
         def classify_geom_tag(a_val: float, b_val: float, plain_th: float = 0.04) -> str:
             if abs(a_val) <= plain_th and abs(b_val) <= plain_th:
                 return "plain"
@@ -950,12 +1007,116 @@ class NewAgent(Agent):
             risk = math.exp(-0.5 * (dist / scale) ** 2)
             return float(max(0.0, min(1.0, risk)))
 
+        def _ray_hit_cushion(origin_xy, dir_xy, axis: str, c_val: float, max_len: float):
+            if axis == "x":
+                if abs(dir_xy[0]) < 1e-9:
+                    return None
+                t = (c_val - origin_xy[0]) / dir_xy[0]
+                if t <= 0.0 or t > max_len:
+                    return None
+                y = origin_xy[1] + dir_xy[1] * t
+                if 0.0 <= y <= table.l:
+                    return t
+                return None
+            if abs(dir_xy[1]) < 1e-9:
+                return None
+            t = (c_val - origin_xy[1]) / dir_xy[1]
+            if t <= 0.0 or t > max_len:
+                return None
+            x = origin_xy[0] + dir_xy[0] * t
+            if 0.0 <= x <= table.w:
+                return t
+            return None
+
+        def _reflect_point(point_xy, axis: str, c_val: float):
+            if axis == "x":
+                return np.array([2.0 * c_val - point_xy[0], point_xy[1]], dtype=float)
+            return np.array([point_xy[0], 2.0 * c_val - point_xy[1]], dtype=float)
+
+        def cushion_reflect_risk(
+            origin_xy,
+            phi_deg: float,
+            length: float,
+            v0: float,
+            v0_std: float,
+            dphi_deg: float,
+            black_xy,
+        ) -> float:
+            if length <= 1e-6:
+                return 0.0
+            v0 = max(float(v0), 1e-3)
+            vmin = max(0.1, v0 - 3.0 * v0_std)
+            vmax = v0 + 3.0 * v0_std
+            ratio_max = min(1.6, vmax / v0)
+            l_max = length * ratio_max
+
+            ang = math.radians(phi_deg)
+            dir_xy = np.array([math.cos(ang), math.sin(ang)], dtype=float)
+            risk = 0.0
+
+            for axis, c_val in (("x", 0.0), ("x", float(table.w)), ("y", 0.0), ("y", float(table.l))):
+                t_hit = _ray_hit_cushion(origin_xy, dir_xy, axis, c_val, l_max)
+                if t_hit is None:
+                    continue
+                mirrored_black = _reflect_point(black_xy, axis, c_val)
+                risk = max(
+                    risk,
+                    sector_risk(
+                        origin_xy,
+                        phi_deg,
+                        length,
+                        v0,
+                        v0_std,
+                        dphi_deg + 2.0,
+                        mirrored_black,
+                    ),
+                )
+            return float(max(0.0, min(1.0, risk)))
+
+        def elastic_after_state(
+            cue_xy: np.ndarray,
+            phi_deg: float,
+            black_xy: np.ndarray,
+            ball_radius: float,
+            dphi_deg: float,
+        ):
+            phi_rad = math.radians(phi_deg)
+            u = np.array([math.cos(phi_rad), math.sin(phi_rad)], dtype=float)
+            vec_cb = black_xy - cue_xy
+            dist_cb = float(np.linalg.norm(vec_cb))
+            if dist_cb < 1e-6:
+                return None
+            t_proj = float(np.dot(vec_cb, u))
+            if t_proj <= 0.0:
+                return None
+            offset = vec_cb - u * t_proj
+            d_perp = float(np.linalg.norm(offset))
+            extra = dist_cb * math.sin(math.radians(max(dphi_deg, 1.0)))
+            hit_radius = 2.0 * ball_radius + extra
+            if d_perp > hit_radius:
+                return None
+            d_clamp = min(max(d_perp, 0.0), 2.0 * ball_radius - 1e-6)
+            t_contact = t_proj - math.sqrt(max(0.0, (2.0 * ball_radius) ** 2 - d_clamp ** 2))
+            if t_contact <= 0.0:
+                t_contact = t_proj
+            contact_xy = cue_xy + u * t_contact
+            n_vec = contact_xy - black_xy
+            n, n_len = unit_vec(n_vec)
+            if n_len < 1e-6:
+                return None
+            dot_un = float(np.dot(u, n))
+            v_tan = u - dot_un * n
+            v_tan_norm = float(np.linalg.norm(v_tan))
+            if v_tan_norm < 1e-6:
+                return contact_xy, None, 0.0
+            v_after_dir = v_tan / v_tan_norm
+            return contact_xy, v_after_dir, v_tan_norm
+
         def prior_penalty_for_action(action, ball_xy, pocket_xy, aim_xy, is_detour: bool) -> float:
             black_ball = balls.get("8", None)
             if black_ball is None or getattr(black_ball.state, "s", 0) == 4:
                 return 0.0
-            if len(my_targets) == 1 and my_targets[0] == "8":
-                return 0.0
+            only_black = len(my_targets) == 1 and my_targets[0] == "8"
             black_xy = np.array(black_ball.state.rvw[0], dtype=float)[:2]
 
             phi_std = float(self.noise_std.get("phi", 0.1))
@@ -964,9 +1125,46 @@ class NewAgent(Agent):
             spin_mag = abs(float(action.get("a", 0.0))) + abs(float(action.get("b", 0.0)))
             theta_val = abs(float(action.get("theta", 0.0)))
             dphi_deg += 12.0 * spin_mag + 0.3 * theta_val
-            if is_detour:
+            if is_detour and detour_penalty:
                 dphi_deg *= 1.4
             dphi_deg = max(dphi_deg, 1.0)
+
+            ctype = str(action.get("candidate_type", "")).lower()
+            type_weights = {
+                "cue": 1.0,
+                "obj": 1.0,
+                "after": 1.0,
+                "cushion": 1.0,
+                "co_pocket": 1.0,
+                "near_ball": 1.0,
+                "near_aim": 1.0,
+                "near_pocket": 1.0,
+            }
+            dphi_scale = 1.0
+            if detour_penalty and "detour" in ctype:
+                type_weights["cue"] *= 1.1
+                type_weights["after"] *= 1.2
+                type_weights["cushion"] *= 1.35
+                dphi_scale *= 1.2
+            if "side" in ctype:
+                type_weights["cue"] *= 1.05
+                type_weights["cushion"] *= 1.2
+                type_weights["near_aim"] *= 1.1
+                dphi_scale *= 1.15
+            if "follow" in ctype:
+                type_weights["after"] *= 1.25
+                type_weights["co_pocket"] *= 1.2
+                dphi_scale *= 1.05
+            if "draw" in ctype:
+                type_weights["after"] *= 1.15
+                dphi_scale *= 1.05
+            if "plain" in ctype:
+                type_weights["cushion"] *= 0.9
+            if ctype in ("opening_safe", "safe_fallback", "random"):
+                for key in type_weights:
+                    type_weights[key] *= 0.85
+                dphi_scale *= 0.9
+            dphi_deg *= dphi_scale
 
             cue_dir, cue_len = unit_vec(aim_xy - cue_xy)
             obj_dir, obj_len = unit_vec(pocket_xy - ball_xy)
@@ -984,6 +1182,7 @@ class NewAgent(Agent):
             cue_risk = sector_risk(
                 cue_xy, phi_deg, cue_len, action.get("V0", 0.0), v0_std, dphi_deg, black_xy
             )
+            action["prior_cue_risk"] = float(cue_risk)
 
             throw_deg = min(25.0, 0.25 * cut_angle_deg + 8.0 * spin_mag)
             obj_phi = float(math.degrees(math.atan2(obj_dir[1], obj_dir[0])) % 360.0)
@@ -995,8 +1194,21 @@ class NewAgent(Agent):
                 v0_std,
                 max(dphi_deg + throw_deg, 2.0),
                 black_xy,
-            )
 
+            )
+            cue_cushion_risk = cushion_reflect_risk(
+                cue_xy, phi_deg, cue_len, action.get("V0", 0.0), v0_std, dphi_deg, black_xy
+            )
+            obj_cushion_risk = cushion_reflect_risk(
+                ball_xy,
+                obj_phi,
+                obj_len,
+                action.get("V0", 0.0),
+                v0_std,
+                max(dphi_deg + throw_deg, 2.0),
+                black_xy,
+
+            )
             cross_z = cue_dir[0] * obj_dir[1] - cue_dir[1] * obj_dir[0]
             side = -math.copysign(1.0, cross_z) if abs(cross_z) > 1e-6 else 1.0
             stun_dir = rot90(obj_dir) * side
@@ -1028,7 +1240,16 @@ class NewAgent(Agent):
                 max(dphi_after, 2.0),
                 black_xy,
             )
+            cue_after_cushion_risk = cushion_reflect_risk(
+                ball_xy,
+                after_phi,
+                cue_after_len,
+                action.get("V0", 0.0),
+                v0_std,
+                max(dphi_after, 2.0),
+                black_xy,
 
+            )
             d_black_ball = float(np.linalg.norm(black_xy - ball_xy))
             near_ball_risk = math.exp(-0.5 * (d_black_ball / max(2.5 * ball_radius, 1e-4)) ** 2)
             d_black_aim = float(np.linalg.norm(black_xy - aim_xy))
@@ -1036,13 +1257,90 @@ class NewAgent(Agent):
             d_black_pocket = float(np.linalg.norm(black_xy - pocket_xy))
             pocket_risk = math.exp(-0.5 * (d_black_pocket / max(1.8 * ball_radius, 1e-4)) ** 2)
 
+            v0_val = float(action.get("V0", 0.0))
+            b_val = float(action.get("b", 0.0))
+            co_pocket_risk = 0.0
+            hit_black_risk = 0.0
+            elastic_state = elastic_after_state(cue_xy, phi_deg, black_xy, ball_radius, dphi_deg)
+            if elastic_state is not None and dist_cb > 1e-6:
+                contact_xy, elastic_dir, sin_theta = elastic_state
+                hit_black_risk = sector_risk(
+                    cue_xy, phi_deg, dist_cb, v0_val, v0_std, dphi_deg, black_xy
+                )
+                if hit_black_risk > 1e-6:
+                    follow_ratio = max(-1.0, min(1.0, b_val / 0.2))
+                    if elastic_dir is None:
+                        if follow_ratio > 0.2:
+                            after_dir = cue_dir
+                        elif follow_ratio < -0.2:
+                            after_dir = -cue_dir
+                        else:
+                            after_dir = None
+                    else:
+                        after_dir = elastic_dir
+                        if abs(follow_ratio) > 0.05:
+                            mix = (1.0 - abs(follow_ratio)) * after_dir + abs(follow_ratio) * (
+                                cue_dir if follow_ratio > 0.0 else -cue_dir
+                            )
+                            after_dir, _ = unit_vec(mix)
+                    if after_dir is not None:
+                        after_phi_elastic = float(
+                            math.degrees(math.atan2(after_dir[1], after_dir[0])) % 360.0
+                        )
+                        v_after = max(0.3, v0_val * max(0.1, sin_theta))
+                        dphi_after_elastic = max(2.0, dphi_deg + 6.0 * (1.0 - sin_theta))
+                        for pocket in table.pockets.values():
+                            p_xy = np.array(pocket.center, dtype=float)[:2]
+                            d_black_p = float(np.linalg.norm(black_xy - p_xy))
+                            black_p_risk = math.exp(
+                                -0.5 * (d_black_p / max(1.6 * ball_radius, 1e-4)) ** 2
+                            )
+                            if black_p_risk < 1e-3:
+                                continue
+                            after_len_p = float(np.linalg.norm(p_xy - contact_xy))
+                            cue_after_p = sector_risk(
+                                contact_xy,
+                                after_phi_elastic,
+                                after_len_p,
+                                v_after,
+                                v0_std,
+                                dphi_after_elastic,
+                                p_xy,
+                            )
+                            cue_after_cushion = cushion_reflect_risk(
+                                contact_xy,
+                                after_phi_elastic,
+                                after_len_p,
+                                v_after,
+                                v0_std,
+                                dphi_after_elastic,
+                                p_xy,
+                            )
+                            cue_after_p = max(cue_after_p, cue_after_cushion)
+                            co_pocket_risk = max(
+                                co_pocket_risk, hit_black_risk * black_p_risk * cue_after_p
+                            )
+            follow_bias = 1.0 + 0.8 * max(0.0, b_val) + 0.35 * max(0.0, v0_val - 2.0) / 3.0
+            co_pocket_risk = min(1.0, co_pocket_risk * min(2.0, follow_bias))
+            action["prior_co_pocket_risk"] = float(co_pocket_risk)
+
+            def _w(risk_val: float, key: str) -> float:
+                return max(0.0, min(1.0, risk_val * type_weights[key]))
+
+            if only_black:
+                penalty = -500.0 * _w(co_pocket_risk, "co_pocket")
+                return float(max(-500.0, min(0.0, penalty)))
+
+            cushion_risk = max(cue_cushion_risk, obj_cushion_risk, cue_after_cushion_risk)
             risk = 1.0 - (
-                (1.0 - cue_risk)
-                * (1.0 - obj_risk)
-                * (1.0 - cue_after_risk)
-                * (1.0 - near_ball_risk)
-                * (1.0 - near_aim_risk)
-                * (1.0 - pocket_risk)
+                (1.0 - _w(cue_risk, "cue"))
+                * (1.0 - _w(obj_risk, "obj"))
+                * (1.0 - _w(cue_after_risk, "after"))
+                * (1.0 - _w(cushion_risk, "cushion"))
+                * (1.0 - _w(co_pocket_risk, "co_pocket"))
+                * (1.0 - _w(near_ball_risk, "near_ball"))
+                * (1.0 - _w(near_aim_risk, "near_aim"))
+                * (1.0 - _w(pocket_risk, "near_pocket"))
             )
             penalty = -500.0 * risk
             return float(max(-500.0, min(0.0, penalty)))
@@ -1056,6 +1354,7 @@ class NewAgent(Agent):
             base_v0: float,
             vec_ca: np.ndarray,
             blockers_for_pair,
+            prefer_side_hint: float = 0.0,
             max_actions_per_pair: int = 3,
         ):
             """
@@ -1084,8 +1383,8 @@ class NewAgent(Agent):
             s_max = min(max(3.0 * clearance, 0.25 * L), 0.8 * L)
 
             # 从 blockers 中推断“优选绕行侧”
-            prefer_side = 0.0
-            if blockers_for_pair:
+            prefer_side = float(prefer_side_hint)
+            if abs(prefer_side) < 1e-6 and blockers_for_pair:
                 nearest = blockers_for_pair[0]
                 side = nearest.get("side", 0.0)
                 # 一般往阻挡球的反侧绕
@@ -1259,15 +1558,21 @@ class NewAgent(Agent):
                 if dist_cb < 1e-6:
                     continue
                 blockers = find_blockers(aim_xy)
-                blocked_any = has_blocker_on_segment(cue_xy, aim_xy)
+                blocked_any_line = has_blocker_on_segment(cue_xy, aim_xy, threshold=block_clearance)
+                near_blockers = find_near_target_blockers(bid, ball_xy, aim_xy, dist_ca)
+                prefer_side_hint = compute_prefer_side(blockers, near_blockers)
+                blockers_all = sorted(blockers + near_blockers, key=lambda x: x.get("along", 0.0))
+                blocked_any = blocked_any_line or bool(near_blockers)
                 cos_cut = float(np.dot(vec_cb, vec_bp) / (dist_cb * dist_bp))
                 cos_cut = max(-1.0, min(1.0, cos_cut))
                 cut_penalty = 1.0 - max(0.0, cos_cut)
+                near_penalty = 0.1 * len(near_blockers) if near_blockers else 0.0
                 score = (
                     dist_bp
                     + 0.6 * dist_ca
                     + 0.25 * len(blockers)
-                    + (0.6 if blocked_any else 0.0)
+                    + (0.6 if blocked_any_line else 0.0)
+                    + near_penalty
                     + 1.5 * cut_penalty
                 )
                 pair_infos.append(
@@ -1279,11 +1584,12 @@ class NewAgent(Agent):
                         aim_xy,
                         vec_ca,
                         dist_bp,
-                        blockers,
+                        blockers_all,
                         blocked_any,
+                        prefer_side_hint,
+
                     )
                 )
-
         if not pair_infos:
             return []
 
@@ -1292,7 +1598,7 @@ class NewAgent(Agent):
         selected_pairs = pair_infos[:pair_budget]
 
         # --- offensive candidates: geom + detour ---
-        for _, bid, ball_xy, pocket_xy, aim_xy, vec_ca, dist_bp, blockers, blocked_any in selected_pairs:
+        for _, bid, ball_xy, pocket_xy, aim_xy, vec_ca, dist_bp, blockers, blocked_any, prefer_side_hint in selected_pairs:
             base_phi_deg = math.degrees(math.atan2(vec_ca[1], vec_ca[0])) % 360.0
             base_v0 = float(np.clip(dist_bp * 4.5, 1.0, 6.5))
             risk_penalty = 0.25 * len(blockers)
@@ -1318,13 +1624,14 @@ class NewAgent(Agent):
 
             add_templated_geom_actions(base_phi_deg, base_v0, base_cost, ball_xy, pocket_xy, aim_xy)
 
-            if blocked_any:
+            if (not geom_only) and blocked_any:
                 detour_for_pair = plan_detour_actions_for_pair(
                     bid=bid,
                     aim_xy=aim_xy,
                     base_v0=base_v0,
                     vec_ca=vec_ca,
                     blockers_for_pair=blockers,
+                    prefer_side_hint=prefer_side_hint,
                     max_actions_per_pair=3,
                 )
                 for cost_like, act in detour_for_pair:
@@ -1337,20 +1644,23 @@ class NewAgent(Agent):
         geom_actions = [act for _, act in candidates]
         detour_actions = [act for _, act in detour_candidates]
 
-        target_detour = max(1, int(num_candidates * 0.15))
-        target_geom = max(1, num_candidates - target_detour)
+        if geom_only:
+            target_detour = 0
+            target_geom = max(1, num_candidates)
+        else:
+            target_detour = max(1, int(num_candidates * 0.25))
+            target_geom = max(1, num_candidates - target_detour)
 
         keep_geom = geom_actions[: min(len(geom_actions), target_geom)]
-        keep_detour = detour_actions[: min(len(detour_actions), target_detour)]
+        keep_detour = [] if geom_only else detour_actions[: min(len(detour_actions), target_detour)]
 
         final_candidates = list(keep_geom + keep_detour)
         used = len(final_candidates)
 
         # 从剩余 geom/detour 中继续补足
-        leftover_scored = (
-            candidates[len(keep_geom):]
-            + detour_candidates[len(keep_detour):]
-        )
+        leftover_scored = candidates[len(keep_geom):]
+        if not geom_only:
+            leftover_scored += detour_candidates[len(keep_detour):]
         leftover_scored.sort(key=lambda x: x[0])
         for _, act in leftover_scored:
             if used >= num_candidates:

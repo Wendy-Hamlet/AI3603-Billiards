@@ -30,6 +30,36 @@ agent_a, agent_b = BasicAgent(), NewAgent()
 players = [agent_a, agent_b]  # 用于切换先后手
 target_ball_choice = ['solid', 'solid', 'stripe', 'stripe']  # 轮换球型
 
+def _count_remaining(env, player_id):
+    return len([
+        bid for bid in env.player_targets[player_id]
+        if bid != '8' and env.balls[bid].state.s != 4
+    ])
+
+def _remaining_own_before(env, player_id):
+    return [
+        bid for bid in env.player_targets[player_id]
+        if env.last_state[bid].state.s != 4
+    ]
+
+def _describe_end_reason(env, shooter, step_info, done_info):
+    winner = done_info.get('winner')
+    if step_info.get('BLACK_BALL_INTO_POCKET'):
+        if step_info.get('WHITE_BALL_INTO_POCKET'):
+            return f"reason=black8_and_cue_foul shooter={shooter} winner={winner}"
+        remaining_own = _remaining_own_before(env, shooter)
+        if len(remaining_own) == 0:
+            return f"reason=black8_legal shooter={shooter} winner={winner}"
+        return (
+            f"reason=black8_foul shooter={shooter} "
+            f"remaining_own={len(remaining_own)} winner={winner}"
+        )
+    if done_info.get('hit_count', 0) >= env.MAX_HIT_COUNT:
+        a_left = _count_remaining(env, 'A')
+        b_left = _count_remaining(env, 'B')
+        return f"reason=max_hit_count a_left={a_left} b_left={b_left} winner={winner}"
+    return f"reason=unknown winner={winner}"
+
 for i in range(n_games): 
     print()
     print(f"------- 第 {i} 局比赛开始 -------")
@@ -65,6 +95,8 @@ for i in range(n_games):
             if step_info.get('ENEMY_INTO_POCKET'):
                 print(f"对方球入袋：{step_info['ENEMY_INTO_POCKET']}")
         if done:
+            end_reason = _describe_end_reason(env, player, step_info, info)
+            print(f"[game_end] {end_reason}")
             # 统计结果（player A/B 转换为 agent A/B） 
             if info['winner'] == 'SAME':
                 results['SAME'] += 1
@@ -79,7 +111,8 @@ for i in range(n_games):
                 f"[累计比分] Agent A: {curr_a_score:.1f} "
                 f"(胜{results['AGENT_A_WIN']}, 平{results['SAME']}) | "
                 f"Agent B: {curr_b_score:.1f} "
-                f"(胜{results['AGENT_B_WIN']}, 平{results['SAME']})"
+                f"(胜{results['AGENT_B_WIN']}, 平{results['SAME']}) |"
+                f"胜率: {curr_b_score / (curr_b_score + curr_a_score):.2%}"
             )
             break
 
