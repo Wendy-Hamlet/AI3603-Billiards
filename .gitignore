@@ -235,3 +235,6 @@ __marimo__/
 __pycache__/
 train/imitation/data*/
 train/imitation/checkpoints*/
+
+# vscode
+.vscode/
