@@ -1,0 +1,5 @@
+{
+    "python.defaultInterpreterPath": "/home/chjin/miniconda3/envs/poolenv/bin/python",
+    "python.terminal.activateEnvironment": true
+}
+
