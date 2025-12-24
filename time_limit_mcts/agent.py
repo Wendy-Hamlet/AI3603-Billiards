@@ -476,7 +476,7 @@ class NewAgent(Agent):
 
     def __init__(
         self,
-        num_candidates: int = 50,
+        num_candidates: int = 30,
         num_simulations: int = 150,
         time_limit_s: float = 3.0,
         max_depth: int = 2,           # 保留参数，占位
@@ -774,6 +774,7 @@ class NewAgent(Agent):
         near_line_band = max(block_clearance, ball_radius * 3.6)
         near_t_min = 0.6
         angle_offsets = [-4.0, -2.0, 0.0, 2.0, 4.0]
+        priority_offsets = [-0.7, 0.0, 0.7]
         own_set = set(my_targets)
 
         # ------- 基础几何工具 -------
@@ -901,21 +902,36 @@ class NewAgent(Agent):
 
         # --- fusion extras: templated spins ---
         spin_profiles = [
-            {"name": "plain", "a": 0.0, "b": 0.0, "theta": (0.0, 6.0), "v": (0.9, 1.1)},
             {"name": "follow_soft", "a": 0.0, "b": 0.15, "theta": (0.0, 7.0), "v": (0.95, 1.1)},
             {"name": "draw_soft", "a": 0.0, "b": -0.15, "theta": (0.0, 8.0), "v": (0.95, 1.1)},
             {"name": "side_left", "a": -0.15, "b": 0.0, "theta": (0.0, 7.0), "v": (0.95, 1.1)},
             {"name": "side_right", "a": 0.15, "b": 0.0, "theta": (0.0, 7.0), "v": (0.95, 1.1)},
         ]
-        plain_prof = spin_profiles[0]
-        follow_draw_profiles = [spin_profiles[1], spin_profiles[2]]
-        side_profiles = [spin_profiles[3], spin_profiles[4]]
+        follow_draw_profiles = [spin_profiles[0], spin_profiles[1]]
+        side_profiles = [spin_profiles[2], spin_profiles[3]]
+
+        def add_priority_geom_actions(base_phi_deg, base_v0, base_cost, ball_xy, pocket_xy, aim_xy):
+            # High-priority geom: low spin, low theta, small angle jitter.
+            for off in priority_offsets:
+                phi = (base_phi_deg + off) % 360.0
+                action = {
+                    "V0": float(np.clip(np.random.uniform(base_v0 * 0.95, base_v0 * 1.05), 0.5, 8.0)),
+                    "phi": float(phi),
+                    "theta": float(np.random.uniform(0.0, 3.0)),
+                    "a": float(np.random.uniform(-0.02, 0.02)),
+                    "b": float(np.random.uniform(-0.02, 0.02)),
+                    "candidate_type": "geom_plain",
+                }
+                action["prior_penalty"] = prior_penalty_for_action(
+                    action, ball_xy, pocket_xy, aim_xy, is_detour=False
+                )
+                candidates.append((float(base_cost - 0.15), action))
 
         def add_templated_geom_actions(base_phi_deg, base_v0, base_cost, ball_xy, pocket_xy, aim_xy):
             chosen = [
-                plain_prof,
                 random.choice(follow_draw_profiles),
                 random.choice(side_profiles),
+                random.choice(follow_draw_profiles + side_profiles),
             ]
             for prof in chosen:
                 vmin, vmax = prof["v"]
@@ -1483,41 +1499,113 @@ class NewAgent(Agent):
             if not good_points:
                 return []
 
-            good_points = good_points[:max_actions_per_pair]
+            max_pool = max_actions_per_pair * 6
+            if len(good_points) > max_pool:
+                good_points = good_points[:max_pool]
 
-            # --------- 将 (C -> X -> G) 几何路径映射为 detour 击球参数 ---------
+            # --------- map (C -> X -> G) path to detour action ---------
             detour_actions = []
             L_direct = max(L, 1e-4)
 
-            for obj, min_clear, t_val, s_val, X in good_points:
+            def detour_metrics(item):
+                _, min_clear, _, _, X = item
                 diff = X - C
-                # 分解回 (t,s)，可用于估计弯曲程度
                 t_comp = float(np.dot(diff, e_para))
                 s_comp = float(np.dot(diff, e_perp))
-                curvature = abs(s_comp) / L_direct  # 粗略曲率指标
-
-                # 力度：根据路径拉长比例调整
+                curvature = abs(s_comp) / L_direct
                 path_len = float(np.linalg.norm(X - C) + np.linalg.norm(G - X))
                 length_ratio = path_len / L_direct
-                v0_scale = float(np.clip(0.9 + 0.25 * (length_ratio - 1.0), 0.8, 1.35))
+                vec_cx = X - C
+                vec_len = float(np.linalg.norm(vec_cx))
+                if vec_len < 1e-6:
+                    turn_angle = 180.0
+                else:
+                    cos_turn = float(np.dot(vec_cx / vec_len, e_para))
+                    cos_turn = max(-1.0, min(1.0, cos_turn))
+                    turn_angle = float(math.degrees(math.acos(cos_turn)))
+                return {
+                    "min_clear": min_clear,
+                    "t_comp": t_comp,
+                    "s_comp": s_comp,
+                    "curvature": curvature,
+                    "path_len": path_len,
+                    "length_ratio": length_ratio,
+                    "turn_angle": turn_angle,
+                }
+
+            priority_points = []
+            regular_points = []
+            for idx, item in enumerate(good_points):
+                metrics = detour_metrics(item)
+                min_clear = metrics["min_clear"]
+                if (
+                    min_clear >= 1.15 * min_required_clearance
+                    and metrics["curvature"] <= 0.28
+                    and metrics["length_ratio"] <= 1.35
+                    and metrics["turn_angle"] <= 40.0
+                ):
+                    key = (
+                        metrics["length_ratio"],
+                        metrics["curvature"],
+                        -min_clear,
+                        metrics["turn_angle"],
+                    )
+                    priority_points.append((key, idx, item, metrics))
+                regular_points.append((item[0], idx, item, metrics))
+
+            priority_points.sort(key=lambda x: x[0])
+            priority_points = priority_points[:max_actions_per_pair]
+            used_idx = {p[1] for p in priority_points}
+            remain = max_actions_per_pair - len(priority_points)
+            if remain > 0:
+                regular_points = [r for r in regular_points if r[1] not in used_idx]
+                regular_points.sort(key=lambda x: x[0])
+                regular_points = regular_points[:remain]
+
+            selected_points = [(True, p[2], p[3]) for p in priority_points]
+            selected_points += [(False, r[2], r[3]) for r in regular_points]
+
+            for is_priority, item, metrics in selected_points:
+                _, _, _, _, X = item
+                curvature = metrics["curvature"]
+                path_len = metrics["path_len"]
+                length_ratio = metrics["length_ratio"]
+                s_comp = metrics["s_comp"]
+
+                # power scaling by path length
+                if is_priority:
+                    v0_scale = float(np.clip(0.85 + 0.20 * (length_ratio - 1.0), 0.75, 1.10))
+                else:
+                    v0_scale = float(np.clip(0.9 + 0.25 * (length_ratio - 1.0), 0.8, 1.35))
                 V0_center = base_v0 * v0_scale
 
-                # 角度：朝向 C->X
                 vec_cx = X - C
                 detour_phi = float(math.degrees(math.atan2(vec_cx[1], vec_cx[0])) % 360.0)
 
-                # 根据曲率大小选择合适的抬杆角和侧旋范围
-                if curvature < 0.15:
-                    a_min, a_max = 0.05, 0.12
-                    theta_min, theta_max = 3.0, 7.0
-                elif curvature < 0.3:
-                    a_min, a_max = 0.12, 0.20
-                    theta_min, theta_max = 6.0, 11.0
+                if is_priority:
+                    if curvature < 0.18:
+                        a_min, a_max = 0.04, 0.10
+                        theta_min, theta_max = 2.5, 6.0
+                    else:
+                        a_min, a_max = 0.08, 0.16
+                        theta_min, theta_max = 4.0, 8.0
+                    b_min, b_max = -0.04, 0.04
+                    cost_scale = 0.85
+                    ctype = "detour_pri"
                 else:
-                    a_min, a_max = 0.20, 0.30
-                    theta_min, theta_max = 8.0, 14.0
+                    if curvature < 0.15:
+                        a_min, a_max = 0.05, 0.12
+                        theta_min, theta_max = 3.0, 7.0
+                    elif curvature < 0.3:
+                        a_min, a_max = 0.12, 0.20
+                        theta_min, theta_max = 6.0, 11.0
+                    else:
+                        a_min, a_max = 0.20, 0.30
+                        theta_min, theta_max = 8.0, 14.0
+                    b_min, b_max = -0.06, 0.06
+                    cost_scale = 1.0
+                    ctype = "detour"
 
-                # 侧旋方向与 s 的符号一致
                 side_spin_sign = math.copysign(1.0, s_comp) if abs(s_comp) > 1e-4 else random.choice([-1.0, 1.0])
 
                 detour_action = {
@@ -1525,10 +1613,10 @@ class NewAgent(Agent):
                     "phi": detour_phi,
                     "theta": float(np.random.uniform(theta_min, theta_max)),
                     "a": float(np.random.uniform(a_min, a_max) * side_spin_sign),
-                    "b": float(np.random.uniform(-0.06, 0.06)),
-                    "candidate_type": "detour",
+                    "b": float(np.random.uniform(b_min, b_max)),
+                    "candidate_type": ctype,
                 }
-                detour_actions.append((path_len, detour_action))
+                detour_actions.append((path_len * cost_scale, detour_action))
 
             return detour_actions
 
@@ -1604,11 +1692,15 @@ class NewAgent(Agent):
             risk_penalty = 0.25 * len(blockers)
             base_cost = dist_bp + risk_penalty
 
+            add_priority_geom_actions(base_phi_deg, base_v0, base_cost, ball_xy, pocket_xy, aim_xy)
+
             for off in angle_offsets:
                 phi = (base_phi_deg + off) % 360.0
                 a_val = float(np.random.uniform(-0.12, 0.12))
                 b_val = float(np.random.uniform(-0.12, 0.12))
                 geom_tag = classify_geom_tag(a_val, b_val)
+                if geom_tag == "plain":
+                    continue
                 action = {
                     "V0": float(np.random.uniform(base_v0 * 0.9, base_v0 * 1.1)),
                     "phi": float(phi),
@@ -1648,7 +1740,7 @@ class NewAgent(Agent):
             target_detour = 0
             target_geom = max(1, num_candidates)
         else:
-            target_detour = max(1, int(num_candidates * 0.25))
+            target_detour = max(1, int(num_candidates * 0.2))
             target_geom = max(1, num_candidates - target_detour)
 
         keep_geom = geom_actions[: min(len(geom_actions), target_geom)]
