@@ -1,13 +1,3 @@
-"""
-agent.py - Agent 决策模块
-
-定义 Agent 基类和具体实现：
-- Agent: 基类，定义决策接口
-- BasicAgent: 基于贝叶斯优化的参考实现
-- NewAgent: 学生自定义实现模板
-- analyze_shot_for_reward: 击球结果评分函数
-"""
-
 import math
 import pooltool as pt
 import numpy as np
@@ -23,6 +13,8 @@ import signal
 from bayes_opt import BayesianOptimization, SequentialDomainReductionTransformer
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern
+
+from .agent import Agent
 
 # ============ 超时安全模拟机制 ============
 class SimulationTimeoutError(Exception):
@@ -193,9 +185,10 @@ class Agent():
         }
         return action
 
-
-
-class BasicAgent(Agent):
+# ============ BasicAgentPro: 基于MCTS的进阶 Agent ============
+class BasicAgentPro(Agent):
+    """基于MCTS（蒙特卡洛树搜索）的进阶 Agent"""
+    
     def __init__(self,
                  n_simulations=50,       # 仿真次数
                  c_puct=1.414):          # 探索系数
@@ -208,6 +201,8 @@ class BasicAgent(Agent):
         self.sim_noise = {
             'V0': 0.1, 'phi': 0.15, 'theta': 0.1, 'a': 0.005, 'b': 0.005
         }
+        
+        print("BasicAgentPro (MCTS版) 已初始化。")
 
     def _calc_angle_degrees(self, v):
         angle = math.degrees(math.atan2(v[1], v[0]))
@@ -286,7 +281,7 @@ class BasicAgent(Agent):
     def simulate_action(self, balls, table, action):
         """
         [修改点1] 执行带噪声的物理仿真
-        让 Agent 意识到由于误差的存在，某些“极限球”是不可打的
+        让 Agent 意识到由于误差的存在，某些"极限球"是不可打的
         """
         sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
         sim_table = copy.deepcopy(table)
@@ -358,23 +353,7 @@ class BasicAgent(Agent):
         best_action = candidate_actions[best_idx]
         
         # 简单打印一下当前最好的预测胜率
-        print(f"[BasicAgent] Best Avg Score: {avg_rewards[best_idx]:.3f} (Sims: {self.n_simulations})")
+        print(f"[BasicAgent_pro] Best Avg Score: {avg_rewards[best_idx]:.3f} (Sims: {self.n_simulations})")
         
         return best_action
 
-class NewAgent(Agent):
-    """自定义 Agent 模板（待学生实现）"""
-    
-    def __init__(self):
-        pass
-    
-    def decision(self, balls=None, my_targets=None, table=None):
-        """决策方法
-        
-        参数：
-            observation: (balls, my_targets, table)
-        
-        返回：
-            dict: {'V0', 'phi', 'theta', 'a', 'b'}
-        """
-        return self._random_action()
