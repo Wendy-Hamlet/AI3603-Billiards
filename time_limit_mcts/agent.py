@@ -476,7 +476,7 @@ class NewAgent(Agent):
 
     def __init__(
         self,
-        num_candidates: int = 30,
+        num_candidates: int = 50,
         num_simulations: int = 150,
         time_limit_s: float = 3.0,
         max_depth: int = 2,           # 保留参数，占位
@@ -550,15 +550,15 @@ class NewAgent(Agent):
             print(f"[NewAgent] remaining targets: {remaining_report}")
 
             if self._is_unbroken_rack(balls, table):
-                action = self._opening_safe_action(balls, my_targets)
+                action = self._opening_safe_action(balls, my_targets, table)
                 consume_time = False
-                self._log_action(action, 0, start_ts)
+                self._log_action(action, 0, start_ts, consume_time)
                 return action
 
             remaining_total = max(0.0, self.remaining_time_s)
             if remaining_total <= 0.0:
                 action = self._safe_fallback_action(balls, my_targets, table)
-                self._log_action(action, 0, start_ts)
+                self._log_action(action, 0, start_ts, consume_time)
                 return action
 
             if self.shot_count < 10:
@@ -584,7 +584,7 @@ class NewAgent(Agent):
             )
             if not candidates:
                 action = self._random_action()
-                self._log_action(action, 0, start_ts)
+                self._log_action(action, 0, start_ts, consume_time)
                 return action
 
             fallback_action = candidates[0]
@@ -592,7 +592,7 @@ class NewAgent(Agent):
             remaining = deadline - time.perf_counter() - self._decision_safety_margin_s
             if remaining <= 0.05:
                 action = self._safe_fallback_action(balls, my_targets, table)
-                self._log_action(action, 0, start_ts)
+                self._log_action(action, 0, start_ts, consume_time)
                 return action
 
             action = self.mcts.search(
@@ -603,10 +603,10 @@ class NewAgent(Agent):
                 time_limit_s=remaining,
             )
             if action is None:
-                self._log_action(fallback_action, 0, start_ts)
+                self._log_action(fallback_action, 0, start_ts, consume_time)
                 return fallback_action
             sims_done = getattr(self.mcts, "last_simulations_done", None)
-            self._log_action(action, sims_done, start_ts)
+            self._log_action(action, sims_done, start_ts, consume_time)
             return action
         except Exception as e:
             print(f"[NewAgent] error, fallback to random. Reason: {e}")
@@ -619,10 +619,13 @@ class NewAgent(Agent):
                 self.remaining_time_s = max(0.0, self.remaining_time_s - elapsed)
             self.shot_count += 1
 
-    def _log_action(self, action: dict, sims_done, start_ts: float):
-        remaining_preview = max(
-            0.0, self.remaining_time_s - (time.perf_counter() - start_ts)
-        )
+    def _log_action(self, action: dict, sims_done, start_ts: float, consume_time: bool = True):
+        if not consume_time or start_ts is None:
+            remaining_preview = max(0.0, self.remaining_time_s)
+        else:
+            remaining_preview = max(
+                0.0, self.remaining_time_s - (time.perf_counter() - start_ts)
+            )
         ctype = action.get("candidate_type", "random")
         print(
             f"[NewAgent] action({ctype}, sims={sims_done}, remain={remaining_preview:.2f}s): "
@@ -682,34 +685,38 @@ class NewAgent(Agent):
         span_limit = max(12.0 * ball_radius, 0.25 * min(table.w, table.l))
         return bool(span[0] <= span_limit and span[1] <= span_limit)
 
-    def _opening_safe_action(self, balls, my_targets):
-        cue_ball = balls.get("cue", None)
-        if cue_ball is None:
+    def _opening_safe_action(self, balls, my_targets, table):
+        if balls is None or my_targets is None or table is None:
             return self._random_action()
-        live_targets = [
-            bid for bid in my_targets
-            if bid in balls and getattr(balls[bid].state, "s", 0) != 4
+        num_candidates = max(6, int(self.num_candidates * 0.2))
+        candidates = self._generate_candidate_actions(
+            balls,
+            my_targets,
+            table,
+            num_candidates,
+            geom_only=True,
+            detour_penalty=False,
+        )
+        if not candidates:
+            return self._random_action()
+        geom_plain = [
+            act for act in candidates
+            if str(act.get("candidate_type", "")) == "geom_plain"
         ]
-        if not live_targets:
+        if not geom_plain:
+            geom_plain = [
+                act for act in candidates
+                if str(act.get("candidate_type", "")).startswith("geom_")
+            ]
+        if not geom_plain:
             return self._random_action()
-        target_id = random.choice(live_targets)
-        cue_xy = np.array(cue_ball.state.rvw[0], dtype=float)[:2]
-        target_xy = np.array(balls[target_id].state.rvw[0], dtype=float)[:2]
-        vec = target_xy - cue_xy
-        dist = float(np.linalg.norm(vec))
-        if dist < 1e-6:
-            phi = float(random.uniform(0.0, 360.0))
-        else:
-            phi = float(math.degrees(math.atan2(vec[1], vec[0])) % 360.0)
-        v0 = float(np.clip(max(0.8, dist * 1.2), 0.5, 2.0))
-        return {
-            "V0": v0,
-            "phi": phi,
-            "theta": 2.0,
-            "a": 0.0,
-            "b": 0.0,
-            "candidate_type": "opening_safe",
-        }
+        best_action = max(
+            geom_plain,
+            key=lambda act: float(act.get("prior_penalty", 0.0)),
+        )
+        best_action = dict(best_action)
+        best_action["candidate_type"] = "opening_safe"
+        return best_action
 
     def _safe_fallback_action(self, balls, my_targets, table):
         # final_mode: geom-only + cheap safety score (cue_risk + co_pocket_risk)
@@ -1362,265 +1369,498 @@ class NewAgent(Agent):
             return float(max(-500.0, min(0.0, penalty)))
 
 
-        # ------- 单弯点 detour 优化：在几何上寻找最佳弯点 X -------
+        # --- candidate generation (geom / detour) ---
+        min_geom_clear = ball_radius * 2.2
+        detour_trigger_clear = ball_radius * 2.8
+        detour_plain_clear = ball_radius * 2.2
+        detour_pro_clear = ball_radius * 2.6
+        table_scale = max(float(table.w), float(table.l))
 
-        def plan_detour_actions_for_pair(
-            bid: str,
-            aim_xy: np.ndarray,
-            base_v0: float,
-            vec_ca: np.ndarray,
-            blockers_for_pair,
-            prefer_side_hint: float = 0.0,
-            max_actions_per_pair: int = 3,
-        ):
-            """
-            对 (cue, 目标球 bid, 该 pocket) 这对组合：
-            在平面上搜索一个或多个“弯点” X，使得：
-            - C -> X -> aim_xy 两段线段尽量不靠近任何障碍球；
-            - 路径长度尽量短。
-            然后根据弯曲程度转换为 detour 类型的击球参数。
-            """
+        base_cost_max = 200.0
+        future_reward_max = 100.0
+        cost_scale = base_cost_max / 30.0
+
+        def clamp_score(val):
+            return float(max(0.0, min(base_cost_max, val)))
+
+        def pocket_radius(pocket):
+            r = getattr(pocket, "r", None)
+            if r is None:
+                r = getattr(pocket, "radius", None)
+            if r is None:
+                params = getattr(pocket, "params", None)
+                if params is not None:
+                    r = getattr(params, "R", None)
+            if r is None:
+                r = ball_radius * 2.6
+            return float(r)
+
+        def min_clearance_on_segment(p_start, p_end, ignore_ids=None):
+            ignore_ids = ignore_ids or set()
+            min_dist = float("inf")
+            for oid, ob in balls.items():
+                if oid in ignore_ids or getattr(ob.state, "s", 0) == 4:
+                    continue
+                pos_xy = np.array(ob.state.rvw[0], dtype=float)[:2]
+                dist, t, _ = segment_distance(p_start, p_end, pos_xy)
+                if 0.0 < t < 1.0:
+                    min_dist = min(min_dist, dist)
+            if min_dist == float("inf"):
+                return 999.0
+            return float(min_dist)
+
+        def compute_side_hint(aim_xy, bid):
+            score = 0.0
+            for oid, ob in balls.items():
+                if oid in ("cue", bid) or getattr(ob.state, "s", 0) == 4:
+                    continue
+                pos_xy = np.array(ob.state.rvw[0], dtype=float)[:2]
+                dist, t, side = segment_distance(cue_xy, aim_xy, pos_xy)
+                if 0.0 < t < 1.0 and dist < ball_radius * 3.0:
+                    score -= side * (ball_radius / max(dist, ball_radius))
+            if abs(score) < 0.2:
+                return 0.0
+            return math.copysign(1.0, score)
+
+        def score_geom_pair(bid, ball_xy, pocket_xy, pocket, aim_xy, cue_pos=None):
+            cue_ref = cue_xy if cue_pos is None else cue_pos
+            vec_bp = pocket_xy - ball_xy
+            dist_bp = float(np.linalg.norm(vec_bp))
+            vec_cb = ball_xy - cue_ref
+            dist_cb = float(np.linalg.norm(vec_cb))
+            if dist_bp < 1e-6 or dist_cb < 1e-6:
+                return 0.0, 180.0, 0.0, 0.0, 0.0, dist_bp, dist_cb
+            cos_cut = float(np.dot(vec_cb, vec_bp) / (dist_cb * dist_bp))
+            cos_cut = max(-1.0, min(1.0, cos_cut))
+            cut_deg = float(math.degrees(math.acos(cos_cut)))
+            clear_cue = min_clearance_on_segment(cue_ref, aim_xy, ignore_ids={"cue", bid})
+            clear_obj = min_clearance_on_segment(ball_xy, pocket_xy, ignore_ids={"cue", bid})
+            p_rad = pocket_radius(pocket)
+            mouth = max(1e-4, p_rad - ball_radius * 0.9)
+            window_deg = float(math.degrees(math.atan2(mouth, dist_bp)))
+            f_cut = max(0.0, 1.0 - cut_deg / 60.0)
+            f_clear = min(1.0, min(clear_cue, clear_obj) / (2.6 * ball_radius))
+            f_window = min(1.0, window_deg / 4.0)
+            f_dist = 1.0 / (1.0 + dist_bp / (0.6 * table_scale))
+            score = base_cost_max * (0.4 * f_cut + 0.3 * f_clear + 0.2 * f_window + 0.1 * f_dist)
+            score = clamp_score(score)
+            return score, cut_deg, window_deg, clear_cue, clear_obj, dist_bp, dist_cb
+
+        def rotate_vec(vec, deg):
+            ang = math.radians(deg)
+            c = math.cos(ang)
+            s = math.sin(ang)
+            return np.array([vec[0] * c - vec[1] * s, vec[0] * s + vec[1] * c], dtype=float)
+
+        def clamp_xy(pt_xy):
+            x = float(np.clip(pt_xy[0], ball_radius, table.w - ball_radius))
+            y = float(np.clip(pt_xy[1], ball_radius, table.l - ball_radius))
+            return np.array([x, y], dtype=float)
+
+        future_pairs = []
+
+        def estimate_landing_points(action, ball_xy, pocket_xy, aim_xy, is_detour):
+            cue_dir, cue_len = unit_vec(aim_xy - cue_xy)
+            obj_dir, obj_len = unit_vec(pocket_xy - ball_xy)
+            if cue_len < 1e-6 or obj_len < 1e-6:
+                return []
+            vec_cb = ball_xy - cue_xy
+            vec_bp = pocket_xy - ball_xy
+            dist_cb = float(np.linalg.norm(vec_cb))
+            dist_bp = float(np.linalg.norm(vec_bp))
+            if dist_cb < 1e-6 or dist_bp < 1e-6:
+                return []
+            cos_cut = float(np.dot(vec_cb, vec_bp) / (dist_cb * dist_bp))
+            cos_cut = max(-1.0, min(1.0, cos_cut))
+            cut_angle_deg = float(math.degrees(math.acos(cos_cut)))
+
+            b_val = float(action.get("b", 0.0))
+            a_val = float(action.get("a", 0.0))
+            theta_val = abs(float(action.get("theta", 0.0)))
+            spin_mag = abs(a_val) + abs(b_val)
+            follow_ratio = max(-1.0, min(1.0, b_val / 0.2))
+            cross_z = cue_dir[0] * obj_dir[1] - cue_dir[1] * obj_dir[0]
+            side = -math.copysign(1.0, cross_z) if abs(cross_z) > 1e-6 else 1.0
+            stun_dir = rot90(obj_dir) * side
+
+            if cut_angle_deg < 5.0:
+                after_dir = obj_dir if b_val >= 0.0 else -obj_dir
+            else:
+                if follow_ratio >= 0.0:
+                    mix = (1.0 - follow_ratio) * stun_dir + follow_ratio * obj_dir
+                else:
+                    mix = (1.0 - abs(follow_ratio)) * stun_dir + abs(follow_ratio) * (-obj_dir)
+                after_dir, _ = unit_vec(mix)
+            if float(np.linalg.norm(after_dir)) < 1e-6:
+                return []
+
+            base_after_len = max(ball_radius * 6.0, 0.35 * cue_len)
+            v0_val = float(action.get("V0", 0.0))
+            speed_scale = max(0.4, min(1.8, v0_val / 3.0))
+            spin_scale = 1.0 + 0.8 * abs(b_val)
+            cue_after_len = base_after_len * speed_scale * spin_scale
+            max_len = 0.7 * min(table.w, table.l)
+            cue_after_len = min(cue_after_len, max_len)
+
+            phi_std = float(self.noise_std.get("phi", 0.1))
+            dphi_deg = 3.0 * phi_std + 12.0 * spin_mag + 0.3 * theta_val
+            dphi_after = max(2.0, dphi_deg + 6.0 * abs(a_val) + 0.4 * theta_val)
+            if is_detour:
+                dphi_after *= 1.15
+            dphi_after = min(dphi_after, 22.0)
+
+            offset_small = dphi_after * 0.6
+            offset_large = dphi_after * 1.2
+            offsets = [0.0, offset_small, -offset_small, offset_large, -offset_large]
+            len_scales = [1.0, 0.97, 0.97, 0.92, 0.92]
+            points = []
+            for off, lscale in zip(offsets, len_scales):
+                if abs(off) < 1e-6:
+                    dvec = after_dir
+                else:
+                    dvec = rotate_vec(after_dir, off)
+                pt = ball_xy + dvec * (cue_after_len * lscale)
+                points.append(clamp_xy(pt))
+            return points
+
+        def compute_future_reward(action, base_cost, ball_xy, pocket_xy, aim_xy, is_detour):
+            if not future_pairs:
+                return 0.0
+            if len(my_targets) == 1 and my_targets[0] == "8":
+                return 0.0
+            landing_points = estimate_landing_points(action, ball_xy, pocket_xy, aim_xy, is_detour)
+            if not landing_points:
+                return 0.0
+
+            target_bid = action.get("target_bid", None)
+            point_scores = []
+            for landing in landing_points:
+                scores = []
+                for pair in future_pairs:
+                    if target_bid is not None and pair["bid"] == target_bid:
+                        continue
+                    score, _, _, _, _, _, _ = score_geom_pair(
+                        pair["bid"],
+                        pair["ball_xy"],
+                        pair["pocket_xy"],
+                        pair["pocket"],
+                        pair["aim_xy"],
+                        cue_pos=landing,
+                    )
+                    if score > 0.0:
+                        scores.append(score)
+                if scores:
+                    scores.sort(reverse=True)
+                    top = scores[:4]
+                    landing_score = sum(top) / len(top)
+                else:
+                    landing_score = 0.0
+                point_scores.append(landing_score)
+
+            if not point_scores:
+                return 0.0
+            avg_score = sum(point_scores) / len(point_scores)
+            future_reward = (avg_score / base_cost_max) * future_reward_max
+            return float(max(0.0, min(future_reward_max, future_reward)))
+
+        def finalize_action(action, base_cost, ball_xy, pocket_xy, aim_xy, is_detour):
+            base_cost = clamp_score(base_cost)
+            penalty = prior_penalty_for_action(
+                action, ball_xy, pocket_xy, aim_xy, is_detour=is_detour
+            )
+            future_reward = compute_future_reward(
+                action, base_cost, ball_xy, pocket_xy, aim_xy, is_detour
+            )
+            action["base_cost"] = base_cost
+            action["future_reward"] = float(future_reward)
+            action["prior_penalty"] = float(base_cost + penalty + future_reward)
+            return action, base_cost
+
+        def build_geom_actions_for_pair(pair, max_pro=3):
+            actions = []
+            base_cost = pair["pair_score"]
+            if base_cost <= 0.0:
+                return actions
+            phi = pair["base_phi"]
+            dist_ca = pair["dist_ca"]
+            v_base = 1.5 + dist_ca * 1.5
+            v_base = float(np.clip(v_base, 1.0, 6.0))
+            plain_action = {
+                "V0": v_base,
+                "phi": float(phi),
+                "theta": 0.0,
+                "a": 0.0,
+                "b": 0.0,
+                "candidate_type": "geom_plain",
+                "target_bid": pair["bid"],
+            }
+            act, cost = finalize_action(
+                plain_action,
+                base_cost,
+                pair["ball_xy"],
+                pair["pocket_xy"],
+                pair["aim_xy"],
+                False,
+            )
+            actions.append((cost, act))
+
+            pro_offsets = [-0.8, 0.8]
+            pro_scales = [0.95, 1.05]
+            for off, scale in zip(pro_offsets, pro_scales):
+                phi_pro = (phi + off) % 360.0
+                theta = float(np.random.uniform(0.0, 3.0))
+                a_val = float(np.random.uniform(-0.02, 0.02))
+                b_val = float(np.random.uniform(-0.02, 0.02))
+                action = {
+                    "V0": float(np.clip(v_base * scale, 0.8, 6.5)),
+                    "phi": float(phi_pro),
+                    "theta": theta,
+                    "a": a_val,
+                    "b": b_val,
+                    "candidate_type": "geom_pro",
+                    "target_bid": pair["bid"],
+                }
+                spin_mag = abs(a_val) + abs(b_val)
+                adj = (abs(off) * 2.0 + spin_mag * 15.0 + theta * 0.3) * cost_scale
+                act, cost = finalize_action(
+                    action,
+                    base_cost - adj,
+                    pair["ball_xy"],
+                    pair["pocket_xy"],
+                    pair["aim_xy"],
+                    False,
+                )
+                actions.append((cost, act))
+
+            if max_pro >= 3 and base_cost >= 18.0:
+                b_val = float(random.choice([-0.06, 0.06]))
+                theta = float(np.random.uniform(0.0, 4.0))
+                action = {
+                    "V0": float(np.clip(v_base, 0.8, 6.5)),
+                    "phi": float(phi),
+                    "theta": theta,
+                    "a": 0.0,
+                    "b": b_val,
+                    "candidate_type": "geom_pro",
+                    "target_bid": pair["bid"],
+                }
+                adj = (1.5 + abs(b_val) * 10.0 + theta * 0.3) * cost_scale
+                act, cost = finalize_action(
+                    action,
+                    base_cost - adj,
+                    pair["ball_xy"],
+                    pair["pocket_xy"],
+                    pair["aim_xy"],
+                    False,
+                )
+                actions.append((cost, act))
+
+            return actions
+
+        def detour_plain_actions_for_pair(pair, max_actions=2):
+            actions = []
             C = cue_xy
-            G = aim_xy
+            G = pair["aim_xy"]
             v = G - C
             L = float(np.linalg.norm(v))
             if L < 1e-4:
-                return []
-
-            # 构造局部坐标系：e_para 沿 C->G，e_perp 垂直
+                return actions
             e_para = v / L
             e_perp = np.array([-e_para[1], e_para[0]], dtype=float)
-
-            # t 在 [0.15L, 0.85L] 的中间带；s 为法向偏移
             t_min = 0.15 * L
             t_max = 0.85 * L
+            s_max = min(max(2.4 * ball_radius, 0.25 * L), 0.8 * L)
 
-            # 允许的最大偏移，既要能绕过球，也别太离谱
-            s_max = min(max(3.0 * clearance, 0.25 * L), 0.8 * L)
-
-            # 从 blockers 中推断“优选绕行侧”
-            prefer_side = float(prefer_side_hint)
-            if abs(prefer_side) < 1e-6 and blockers_for_pair:
-                nearest = blockers_for_pair[0]
-                side = nearest.get("side", 0.0)
-                # 一般往阻挡球的反侧绕
-                if abs(side) > 1e-6:
-                    prefer_side = -side
-
-            # 障碍球列表：所有存活球（除了 cue 和当前目标球）
             obstacles = []
             for oid, ob in balls.items():
-                if oid in ("cue", bid):
+                if oid in ("cue", pair["bid"]):
                     continue
                 if getattr(ob.state, "s", 0) == 4:
                     continue
                 pos_xy = np.array(ob.state.rvw[0], dtype=float)[:2]
                 obstacles.append((oid, pos_xy))
-
             if not obstacles:
-                # 场上几乎没球，不必特意 detour
-                return []
+                return actions
 
-            # 目标函数：路径长度 + 碰撞惩罚
-            lambda_coll = 250.0  # 碰撞惩罚权重
-            min_required_clearance = clearance  # 期望的中心线-球心最小距离
+            prefer_side = float(pair.get("side_hint", 0.0))
+            num_samples = 60
+            best_list = []
 
-            def eval_objective(t, s):
-                """
-                t: 沿 C->G 的距离
-                s: 法向偏移
-                """
+            for _ in range(num_samples):
+                t = float(np.random.uniform(t_min, t_max))
+                if prefer_side == 0.0:
+                    side = random.choice([-1.0, 1.0])
+                else:
+                    side = prefer_side if random.random() < 0.7 else -prefer_side
+                s_abs = float(np.random.uniform(0.4 * ball_radius, s_max))
+                s = side * s_abs
                 X = C + t * e_para + s * e_perp
-                # 路径长度
                 path_len = float(np.linalg.norm(X - C) + np.linalg.norm(G - X))
-                penalty = 0.0
                 min_clear = float("inf")
-
+                penalty = 0.0
                 for _, O in obstacles:
-                    # C->X
                     d1, tau1, _ = segment_distance(C, X, O)
-                    # X->G
                     d2, tau2, _ = segment_distance(X, G, O)
-
-                    # 只对线段内部的最近点计惩罚
                     d_candidates = []
                     if 0.0 < tau1 < 1.0:
                         d_candidates.append(d1)
                     if 0.0 < tau2 < 1.0:
                         d_candidates.append(d2)
-
                     if not d_candidates:
                         continue
-
                     d = min(d_candidates)
                     min_clear = min(min_clear, d)
-
-                    if d < min_required_clearance:
-                        # hard penalty：越近惩罚越大
-                        penalty += 1.0 + (min_required_clearance - d) / max(min_required_clearance, 1e-4)
-
-                obj = path_len + lambda_coll * penalty
+                    if d < detour_plain_clear:
+                        penalty += 1.0 + (detour_plain_clear - d) / max(detour_plain_clear, 1e-4)
                 if min_clear == float("inf"):
                     min_clear = 999.0
-                return obj, min_clear, X
+                obj = path_len + 200.0 * penalty
+                best_list.append((obj, min_clear, t, s, X, path_len))
 
-            # --------- 随机多启动搜索 ---------
-            num_samples = 80  # 全局采样次数
-            best_list = []     # 保存若干最优 (obj, min_clear, t, s, X)
-
-            for i in range(num_samples):
-                # t 均匀采样在中段
-                t = float(np.random.uniform(t_min, t_max))
-
-                # s 带有优选侧的偏分布
-                if prefer_side == 0.0:
-                    side = random.choice([-1.0, 1.0])
-                else:
-                    # 70% 概率取优选侧，30% 取另一侧以防局部最优
-                    if random.random() < 0.7:
-                        side = prefer_side
-                    else:
-                        side = -prefer_side
-                s_abs = float(np.random.uniform(0.4 * clearance, s_max))
-                s = side * s_abs
-
-                obj, min_clear, X = eval_objective(t, s)
-
-                best_list.append((obj, min_clear, t, s, X))
-
-            # 按 obj 排序，选出前若干作为候选弯点
             best_list.sort(key=lambda x: x[0])
-            # 优先选“完全无碰撞”的
-            good_points = [item for item in best_list if item[1] >= min_required_clearance]
-            if not good_points:
-                # 放宽一点要求，允许略小于 clearance 的情况
-                good_points = [item for item in best_list if item[1] >= 0.7 * min_required_clearance]
+            best_list = best_list[:max_actions]
 
-            if not good_points:
-                return []
-
-            max_pool = max_actions_per_pair * 6
-            if len(good_points) > max_pool:
-                good_points = good_points[:max_pool]
-
-            # --------- map (C -> X -> G) path to detour action ---------
-            detour_actions = []
-            L_direct = max(L, 1e-4)
-
-            def detour_metrics(item):
-                _, min_clear, _, _, X = item
+            for _, min_clear, t_val, s_val, X, path_len in best_list:
                 diff = X - C
-                t_comp = float(np.dot(diff, e_para))
                 s_comp = float(np.dot(diff, e_perp))
-                curvature = abs(s_comp) / L_direct
-                path_len = float(np.linalg.norm(X - C) + np.linalg.norm(G - X))
-                length_ratio = path_len / L_direct
-                vec_cx = X - C
-                vec_len = float(np.linalg.norm(vec_cx))
-                if vec_len < 1e-6:
-                    turn_angle = 180.0
+                curvature = abs(s_comp) / max(L, 1e-4)
+                length_ratio = path_len / max(L, 1e-4)
+                f_clear = min(1.0, min_clear / (2.8 * ball_radius))
+                f_len = 1.0 / (1.0 + path_len / (1.1 * max(L, 0.4)))
+                f_curve = max(0.0, 1.0 - curvature / 0.9)
+                base_cost = base_cost_max * f_clear * f_len * f_curve
+
+                if curvature < 0.15:
+                    a_min, a_max = 0.04, 0.10
+                    theta_min, theta_max = 2.5, 6.0
+                elif curvature < 0.3:
+                    a_min, a_max = 0.08, 0.16
+                    theta_min, theta_max = 4.0, 9.0
                 else:
-                    cos_turn = float(np.dot(vec_cx / vec_len, e_para))
-                    cos_turn = max(-1.0, min(1.0, cos_turn))
-                    turn_angle = float(math.degrees(math.acos(cos_turn)))
-                return {
-                    "min_clear": min_clear,
-                    "t_comp": t_comp,
-                    "s_comp": s_comp,
-                    "curvature": curvature,
-                    "path_len": path_len,
-                    "length_ratio": length_ratio,
-                    "turn_angle": turn_angle,
-                }
-
-            priority_points = []
-            regular_points = []
-            for idx, item in enumerate(good_points):
-                metrics = detour_metrics(item)
-                min_clear = metrics["min_clear"]
-                if (
-                    min_clear >= 1.15 * min_required_clearance
-                    and metrics["curvature"] <= 0.28
-                    and metrics["length_ratio"] <= 1.35
-                    and metrics["turn_angle"] <= 40.0
-                ):
-                    key = (
-                        metrics["length_ratio"],
-                        metrics["curvature"],
-                        -min_clear,
-                        metrics["turn_angle"],
-                    )
-                    priority_points.append((key, idx, item, metrics))
-                regular_points.append((item[0], idx, item, metrics))
-
-            priority_points.sort(key=lambda x: x[0])
-            priority_points = priority_points[:max_actions_per_pair]
-            used_idx = {p[1] for p in priority_points}
-            remain = max_actions_per_pair - len(priority_points)
-            if remain > 0:
-                regular_points = [r for r in regular_points if r[1] not in used_idx]
-                regular_points.sort(key=lambda x: x[0])
-                regular_points = regular_points[:remain]
-
-            selected_points = [(True, p[2], p[3]) for p in priority_points]
-            selected_points += [(False, r[2], r[3]) for r in regular_points]
-
-            for is_priority, item, metrics in selected_points:
-                _, _, _, _, X = item
-                curvature = metrics["curvature"]
-                path_len = metrics["path_len"]
-                length_ratio = metrics["length_ratio"]
-                s_comp = metrics["s_comp"]
-
-                # power scaling by path length
-                if is_priority:
-                    v0_scale = float(np.clip(0.85 + 0.20 * (length_ratio - 1.0), 0.75, 1.10))
-                else:
-                    v0_scale = float(np.clip(0.9 + 0.25 * (length_ratio - 1.0), 0.8, 1.35))
-                V0_center = base_v0 * v0_scale
-
-                vec_cx = X - C
-                detour_phi = float(math.degrees(math.atan2(vec_cx[1], vec_cx[0])) % 360.0)
-
-                if is_priority:
-                    if curvature < 0.18:
-                        a_min, a_max = 0.04, 0.10
-                        theta_min, theta_max = 2.5, 6.0
-                    else:
-                        a_min, a_max = 0.08, 0.16
-                        theta_min, theta_max = 4.0, 8.0
-                    b_min, b_max = -0.04, 0.04
-                    cost_scale = 0.85
-                    ctype = "detour_pri"
-                else:
-                    if curvature < 0.15:
-                        a_min, a_max = 0.05, 0.12
-                        theta_min, theta_max = 3.0, 7.0
-                    elif curvature < 0.3:
-                        a_min, a_max = 0.12, 0.20
-                        theta_min, theta_max = 6.0, 11.0
-                    else:
-                        a_min, a_max = 0.20, 0.30
-                        theta_min, theta_max = 8.0, 14.0
-                    b_min, b_max = -0.06, 0.06
-                    cost_scale = 1.0
-                    ctype = "detour"
+                    a_min, a_max = 0.12, 0.22
+                    theta_min, theta_max = 6.0, 12.0
 
                 side_spin_sign = math.copysign(1.0, s_comp) if abs(s_comp) > 1e-4 else random.choice([-1.0, 1.0])
-
+                v0_scale = float(np.clip(0.9 + 0.3 * (length_ratio - 1.0), 0.8, 1.4))
+                detour_phi = float(math.degrees(math.atan2(diff[1], diff[0])) % 360.0)
                 detour_action = {
-                    "V0": float(np.random.uniform(0.9 * V0_center, 1.1 * V0_center)),
+                    "V0": float(np.clip(pair["base_v0"] * v0_scale, 0.8, 7.0)),
                     "phi": detour_phi,
                     "theta": float(np.random.uniform(theta_min, theta_max)),
                     "a": float(np.random.uniform(a_min, a_max) * side_spin_sign),
-                    "b": float(np.random.uniform(b_min, b_max)),
-                    "candidate_type": ctype,
+                    "b": float(np.random.uniform(-0.05, 0.05)),
+                    "candidate_type": "detour_plain",
+                    "target_bid": pair["bid"],
                 }
-                detour_actions.append((path_len * cost_scale, detour_action))
+                act, cost = finalize_action(
+                    detour_action,
+                    base_cost,
+                    pair["ball_xy"],
+                    pair["pocket_xy"],
+                    pair["aim_xy"],
+                    True,
+                )
+                actions.append((cost, act))
 
-            return detour_actions
+            return actions
 
-        # --- cheap prefilter for (ball, pocket) pairs ---
+        def detour_pro_actions_for_pair(pair, max_actions=2):
+            actions = []
+            ball_xy = pair["ball_xy"]
+            pocket_xy = pair["pocket_xy"]
+            bid = pair["bid"]
+            for axis, c_val in (("x", 0.0), ("x", float(table.w)), ("y", 0.0), ("y", float(table.l))):
+                if axis == "x":
+                    if abs(pocket_xy[0] - c_val) < 1e-4:
+                        continue
+                else:
+                    if abs(pocket_xy[1] - c_val) < 1e-4:
+                        continue
+                mirror = _reflect_point(pocket_xy, axis, c_val)
+                dir_vec = mirror - ball_xy
+                dir_len = float(np.linalg.norm(dir_vec))
+                if dir_len < 1e-6:
+                    continue
+                if axis == "x":
+                    if abs(dir_vec[0]) < 1e-9:
+                        continue
+                    t = (c_val - ball_xy[0]) / dir_vec[0]
+                    if t <= 0.0:
+                        continue
+                    y = ball_xy[1] + dir_vec[1] * t
+                    if not (0.0 <= y <= table.l):
+                        continue
+                    bank_pt = np.array([c_val, y], dtype=float)
+                else:
+                    if abs(dir_vec[1]) < 1e-9:
+                        continue
+                    t = (c_val - ball_xy[1]) / dir_vec[1]
+                    if t <= 0.0:
+                        continue
+                    x = ball_xy[0] + dir_vec[0] * t
+                    if not (0.0 <= x <= table.w):
+                        continue
+                    bank_pt = np.array([x, c_val], dtype=float)
+
+                bank_dir = bank_pt - ball_xy
+                dist_bb = float(np.linalg.norm(bank_dir))
+                if dist_bb < 2.0 * ball_radius:
+                    continue
+                bank_unit = bank_dir / dist_bb
+                aim_xy = ball_xy - bank_unit * (2.0 * ball_radius)
+                dist_ca = float(np.linalg.norm(aim_xy - cue_xy))
+                if dist_ca < 1e-6:
+                    continue
+                dist_bp = float(np.linalg.norm(pocket_xy - bank_pt))
+                if dist_bp < 2.0 * ball_radius:
+                    continue
+
+                clear_cue = min_clearance_on_segment(cue_xy, aim_xy, ignore_ids={"cue", bid})
+                clear_obj = min_clearance_on_segment(ball_xy, bank_pt, ignore_ids={"cue", bid})
+                clear_bank = min_clearance_on_segment(bank_pt, pocket_xy, ignore_ids={"cue", bid})
+                min_clear = min(clear_cue, clear_obj, clear_bank)
+                if min_clear < detour_pro_clear:
+                    continue
+
+                bank_to_pocket = pocket_xy - bank_pt
+                btp_len = float(np.linalg.norm(bank_to_pocket))
+                if btp_len < 1e-6:
+                    continue
+                cos_turn = float(np.dot(bank_dir / dist_bb, bank_to_pocket / btp_len))
+                cos_turn = max(-1.0, min(1.0, cos_turn))
+                turn_angle = float(math.degrees(math.acos(cos_turn)))
+                f_turn = max(0.0, math.cos(math.radians(turn_angle)))
+                total_len = dist_ca + dist_bb + dist_bp
+                f_len = 1.0 / (1.0 + total_len / (1.1 * table_scale))
+                f_clear = min(1.0, min_clear / (3.2 * ball_radius))
+                base_cost = base_cost_max * f_turn * f_len * f_clear
+                if base_cost <= 0.0:
+                    continue
+
+                v0 = float(np.clip(1.2 + total_len * 1.1, 1.0, 7.0))
+                detour_phi = float(math.degrees(math.atan2(aim_xy[1] - cue_xy[1], aim_xy[0] - cue_xy[0])) % 360.0)
+                detour_action = {
+                    "V0": v0,
+                    "phi": detour_phi,
+                    "theta": float(np.random.uniform(0.0, 4.0)),
+                    "a": float(np.random.uniform(-0.03, 0.03)),
+                    "b": float(np.random.uniform(-0.03, 0.03)),
+                    "candidate_type": "detour_pro",
+                    "target_bid": bid,
+                }
+                act, cost = finalize_action(
+                    detour_action,
+                    base_cost,
+                    ball_xy,
+                    pocket_xy,
+                    aim_xy,
+                    True,
+                )
+                actions.append((cost, act))
+
+            actions.sort(key=lambda x: x[0], reverse=True)
+            return actions[:max_actions]
+
         pair_infos = []
         for bid in my_targets:
             if bid == "cue":
@@ -1641,134 +1881,149 @@ class NewAgent(Agent):
                 dist_ca = float(np.linalg.norm(vec_ca))
                 if dist_ca < 1e-6:
                     continue
-                vec_cb = ball_xy - cue_xy
-                dist_cb = float(np.linalg.norm(vec_cb))
-                if dist_cb < 1e-6:
-                    continue
-                blockers = find_blockers(aim_xy)
-                blocked_any_line = has_blocker_on_segment(cue_xy, aim_xy, threshold=block_clearance)
-                near_blockers = find_near_target_blockers(bid, ball_xy, aim_xy, dist_ca)
-                prefer_side_hint = compute_prefer_side(blockers, near_blockers)
-                blockers_all = sorted(blockers + near_blockers, key=lambda x: x.get("along", 0.0))
-                blocked_any = blocked_any_line or bool(near_blockers)
-                cos_cut = float(np.dot(vec_cb, vec_bp) / (dist_cb * dist_bp))
-                cos_cut = max(-1.0, min(1.0, cos_cut))
-                cut_penalty = 1.0 - max(0.0, cos_cut)
-                near_penalty = 0.1 * len(near_blockers) if near_blockers else 0.0
-                score = (
-                    dist_bp
-                    + 0.6 * dist_ca
-                    + 0.25 * len(blockers)
-                    + (0.6 if blocked_any_line else 0.0)
-                    + near_penalty
-                    + 1.5 * cut_penalty
+                score, cut_deg, window_deg, clear_cue, clear_obj, dist_bp, dist_cb = score_geom_pair(
+                    bid, ball_xy, pocket_xy, pocket, aim_xy
                 )
-                pair_infos.append(
-                    (
-                        score,
-                        bid,
-                        ball_xy,
-                        pocket_xy,
-                        aim_xy,
-                        vec_ca,
-                        dist_bp,
-                        blockers_all,
-                        blocked_any,
-                        prefer_side_hint,
+                base_phi = float(math.degrees(math.atan2(vec_ca[1], vec_ca[0])) % 360.0)
+                needs_detour = (
+                    clear_cue < detour_trigger_clear
+                    or clear_obj < detour_trigger_clear
+                    or cut_deg > 50.0
+                )
+                pair_infos.append({
+                    "bid": bid,
+                    "ball_xy": ball_xy,
+                    "pocket_xy": pocket_xy,
+                    "pocket": pocket,
+                    "aim_xy": aim_xy,
+                    "dist_ca": dist_ca,
+                    "dist_bp": dist_bp,
+                    "dist_cb": dist_cb,
+                    "base_phi": base_phi,
+                    "base_v0": float(np.clip(1.5 + dist_ca * 1.5, 1.0, 6.0)),
+                    "pair_score": score,
+                    "cut_deg": cut_deg,
+                    "window_deg": window_deg,
+                    "clear_cue": clear_cue,
+                    "clear_obj": clear_obj,
+                    "needs_detour": needs_detour,
+                    "side_hint": compute_side_hint(aim_xy, bid),
+                })
 
-                    )
-                )
         if not pair_infos:
             return []
 
-        pair_infos.sort(key=lambda x: x[0])
-        pair_budget = min(len(pair_infos), max(6, int(num_candidates * 1.0)))
-        selected_pairs = pair_infos[:pair_budget]
-
-        # --- offensive candidates: geom + detour ---
-        for _, bid, ball_xy, pocket_xy, aim_xy, vec_ca, dist_bp, blockers, blocked_any, prefer_side_hint in selected_pairs:
-            base_phi_deg = math.degrees(math.atan2(vec_ca[1], vec_ca[0])) % 360.0
-            base_v0 = float(np.clip(dist_bp * 4.5, 1.0, 6.5))
-            risk_penalty = 0.25 * len(blockers)
-            base_cost = dist_bp + risk_penalty
-
-            add_priority_geom_actions(base_phi_deg, base_v0, base_cost, ball_xy, pocket_xy, aim_xy)
-
-            for off in angle_offsets:
-                phi = (base_phi_deg + off) % 360.0
-                a_val = float(np.random.uniform(-0.12, 0.12))
-                b_val = float(np.random.uniform(-0.12, 0.12))
-                geom_tag = classify_geom_tag(a_val, b_val)
-                if geom_tag == "plain":
-                    continue
-                action = {
-                    "V0": float(np.random.uniform(base_v0 * 0.9, base_v0 * 1.1)),
-                    "phi": float(phi),
-                    "theta": float(np.random.uniform(0.0, 8.0)),
-                    "a": a_val,
-                    "b": b_val,
-                    "candidate_type": f"geom_{geom_tag}",
-                }
-                action["prior_penalty"] = prior_penalty_for_action(
-                    action, ball_xy, pocket_xy, aim_xy, is_detour=False
-                )
-                candidates.append((base_cost, action))
-
-            add_templated_geom_actions(base_phi_deg, base_v0, base_cost, ball_xy, pocket_xy, aim_xy)
-
-            if (not geom_only) and blocked_any:
-                detour_for_pair = plan_detour_actions_for_pair(
-                    bid=bid,
-                    aim_xy=aim_xy,
-                    base_v0=base_v0,
-                    vec_ca=vec_ca,
-                    blockers_for_pair=blockers,
-                    prefer_side_hint=prefer_side_hint,
-                    max_actions_per_pair=3,
-                )
-                for cost_like, act in detour_for_pair:
-                    act["prior_penalty"] = prior_penalty_for_action(
-                        act, ball_xy, pocket_xy, aim_xy, is_detour=True
-                    )
-                    detour_candidates.append((base_cost + 0.1 + cost_like, act))
-        candidates.sort(key=lambda x: x[0])
-        detour_candidates.sort(key=lambda x: x[0])
-        geom_actions = [act for _, act in candidates]
-        detour_actions = [act for _, act in detour_candidates]
-
+        pair_infos.sort(key=lambda x: x["pair_score"], reverse=True)
+        future_pairs = pair_infos
         if geom_only:
-            target_detour = 0
             target_geom = max(1, num_candidates)
+            target_detour = 0
         else:
-            target_detour = max(1, int(num_candidates * 0.2))
-            target_geom = max(1, num_candidates - target_detour)
+            target_geom = max(1, int(round(num_candidates * 0.8)))
+            target_detour = max(1, num_candidates - target_geom)
 
-        keep_geom = geom_actions[: min(len(geom_actions), target_geom)]
-        keep_detour = [] if geom_only else detour_actions[: min(len(detour_actions), target_detour)]
+        pair_budget = min(len(pair_infos), max(8, int(math.ceil(target_geom / 3.0)) + 2))
+        selected_pairs = pair_infos[:pair_budget]
+        if (not geom_only) and target_detour > 0:
+            detour_pair_budget = max(2, int(math.ceil(pair_budget * 0.5)))
+            selected_keys = set()
+            for p in selected_pairs:
+                px = float(p["pocket_xy"][0])
+                py = float(p["pocket_xy"][1])
+                selected_keys.add((p["bid"], round(px, 4), round(py, 4)))
+            detour_pairs = []
+            for p in pair_infos:
+                if not p["needs_detour"]:
+                    continue
+                px = float(p["pocket_xy"][0])
+                py = float(p["pocket_xy"][1])
+                key = (p["bid"], round(px, 4), round(py, 4))
+                if key in selected_keys:
+                    continue
+                detour_pairs.append(p)
+            detour_pairs.sort(key=lambda x: x["pair_score"], reverse=True)
+            selected_pairs.extend(detour_pairs[:detour_pair_budget])
 
-        final_candidates = list(keep_geom + keep_detour)
+        geom_actions = []
+        detour_plain_actions = []
+        detour_pro_actions = []
+
+        for pair in selected_pairs:
+            geom_actions.extend(build_geom_actions_for_pair(pair, max_pro=3))
+            if (not geom_only) and pair["needs_detour"]:
+                detour_pro_actions.extend(detour_pro_actions_for_pair(pair, max_actions=2))
+                detour_plain_actions.extend(detour_plain_actions_for_pair(pair, max_actions=2))
+
+        geom_actions.sort(key=lambda x: x[0], reverse=True)
+        detour_plain_actions.sort(key=lambda x: x[0], reverse=True)
+        detour_pro_actions.sort(key=lambda x: x[0], reverse=True)
+
+        keep_geom = geom_actions[:target_geom]
+        detour_actions = []
+        if target_detour > 0:
+            detour_plain_quota = int(round(target_detour * 0.4))
+            detour_plain_quota = max(0, min(detour_plain_quota, target_detour))
+            detour_pro_quota = max(0, target_detour - detour_plain_quota)
+            detour_actions.extend(detour_pro_actions[:detour_pro_quota])
+            detour_actions.extend(detour_plain_actions[:detour_plain_quota])
+            if len(detour_actions) < target_detour:
+                remain = target_detour - len(detour_actions)
+                extra = detour_pro_actions[detour_pro_quota:] + detour_plain_actions[detour_plain_quota:]
+                extra.sort(key=lambda x: x[0], reverse=True)
+                detour_actions.extend(extra[:remain])
+
+        final_candidates = [act for _, act in keep_geom] + [act for _, act in detour_actions]
         used = len(final_candidates)
 
-        # 从剩余 geom/detour 中继续补足
-        leftover_scored = candidates[len(keep_geom):]
-        if not geom_only:
-            leftover_scored += detour_candidates[len(keep_detour):]
-        leftover_scored.sort(key=lambda x: x[0])
-        for _, act in leftover_scored:
+        leftover = geom_actions[len(keep_geom):]
+        if target_detour > 0:
+            leftover += detour_pro_actions + detour_plain_actions
+        leftover.sort(key=lambda x: x[0], reverse=True)
+        for _, act in leftover:
             if used >= num_candidates:
                 break
             final_candidates.append(act)
             used += 1
 
-        # 如果仍未满足数量，用随机动作补齐
-        while used < num_candidates:
-            rand_act = self._random_action()
-            rand_act["candidate_type"] = "random"
-            rand_act["prior_penalty"] = 0.0
-            final_candidates.append(rand_act)
-            used += 1
+        if used < num_candidates:
+            geom_fillers = []
+            filler_offsets = [-1.5, 1.5, -2.5, 2.5]
+            for pair in selected_pairs:
+                base_cost = pair["pair_score"]
+                if base_cost <= 0.0:
+                    continue
+                phi = pair["base_phi"]
+                dist_ca = pair["dist_ca"]
+                v_base = 1.5 + dist_ca * 1.5
+                v_base = float(np.clip(v_base, 1.0, 6.0))
+                for off in filler_offsets:
+                    phi_fill = (phi + off) % 360.0
+                    action = {
+                        "V0": float(np.clip(v_base, 0.8, 6.5)),
+                        "phi": float(phi_fill),
+                        "theta": float(np.random.uniform(0.0, 2.5)),
+                        "a": float(np.random.uniform(-0.015, 0.015)),
+                        "b": float(np.random.uniform(-0.015, 0.015)),
+                        "candidate_type": "geom_plain",
+                        "target_bid": pair["bid"],
+                    }
+                    adj = abs(off) * 2.2 * cost_scale
+                    act, cost = finalize_action(
+                        action,
+                        base_cost - adj,
+                        pair["ball_xy"],
+                        pair["pocket_xy"],
+                        pair["aim_xy"],
+                        False,
+                    )
+                    geom_fillers.append((cost, act))
+            geom_fillers.sort(key=lambda x: x[0], reverse=True)
+            for _, act in geom_fillers:
+                if used >= num_candidates:
+                    break
+                final_candidates.append(act)
+                used += 1
 
-        # 如果候选数超出了，随机下采样到 num_candidates
         if len(final_candidates) > num_candidates:
             final_candidates = final_candidates[:num_candidates]
 
