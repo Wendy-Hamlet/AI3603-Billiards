@@ -21,7 +21,10 @@ import copy
 import os
 from datetime import datetime
 import random
-from pooltool import ShotViewer
+try:
+    from pooltool import ShotViewer
+except ImportError:
+    ShotViewer = None  # 不影响无渲染模式
 
 from agent import Agent, BasicAgent, NewAgent
 
