@@ -1688,7 +1688,11 @@ class NewAgent(Agent):
                 return val * gate
 
             target_bid = action.get("target_bid", None)
-            last_object = len(my_targets) == 1 and my_targets[0] != "8"
+            remaining_own_local = [
+                bid for bid in my_targets
+                if bid in balls and getattr(balls[bid].state, "s", 0) != 4 and bid != "8"
+            ]
+            last_object = (len(remaining_own_local) == 1 and target_bid in remaining_own_local)
             point_scores = []
             for landing in landing_points:
                 if last_object:
