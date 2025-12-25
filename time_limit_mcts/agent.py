@@ -1351,8 +1351,8 @@ class NewAgent(Agent):
                 return max(0.0, min(1.0, risk_val * type_weights[key]))
 
             if only_black:
-                penalty = -500.0 * _w(co_pocket_risk, "co_pocket")
-                return float(max(-500.0, min(0.0, penalty)))
+                penalty = -200.0 * _w(co_pocket_risk, "co_pocket")
+                return float(max(-200.0, min(0.0, penalty)))
 
             cushion_risk = max(cue_cushion_risk, obj_cushion_risk, cue_after_cushion_risk)
             risk = 1.0 - (
@@ -1377,7 +1377,7 @@ class NewAgent(Agent):
         table_scale = max(float(table.w), float(table.l))
 
         base_cost_max = 200.0
-        future_reward_max = 100.0
+        future_reward_max = 150.0
         cost_scale = base_cost_max / 30.0
 
         def clamp_score(val):
@@ -1532,35 +1532,254 @@ class NewAgent(Agent):
             if not landing_points:
                 return 0.0
 
+            def detour_plain_scores_for_pair(pair, cue_pos, max_scores=2):
+                scores = []
+                C = cue_pos
+                G = pair["aim_xy"]
+                v = G - C
+                L = float(np.linalg.norm(v))
+                if L < 1e-4:
+                    return scores
+                e_para = v / L
+                e_perp = np.array([-e_para[1], e_para[0]], dtype=float)
+                t_min = 0.15 * L
+                t_max = 0.85 * L
+                s_max = min(max(2.4 * ball_radius, 0.25 * L), 0.8 * L)
+
+                obstacles = []
+                for oid, ob in balls.items():
+                    if oid in ("cue", pair["bid"]):
+                        continue
+                    if getattr(ob.state, "s", 0) == 4:
+                        continue
+                    pos_xy = np.array(ob.state.rvw[0], dtype=float)[:2]
+                    obstacles.append((oid, pos_xy))
+                if not obstacles:
+                    return scores
+
+                num_samples = 80
+                best_list = []
+                for _ in range(num_samples):
+                    t = float(np.random.uniform(t_min, t_max))
+                    side = random.choice([-1.0, 1.0])
+                    s_abs = float(np.random.uniform(0.4 * ball_radius, s_max))
+                    s = side * s_abs
+                    X = C + t * e_para + s * e_perp
+                    path_len = float(np.linalg.norm(X - C) + np.linalg.norm(G - X))
+                    min_clear = float("inf")
+                    penalty = 0.0
+                    for _, O in obstacles:
+                        d1, tau1, _ = segment_distance(C, X, O)
+                        d2, tau2, _ = segment_distance(X, G, O)
+                        d_candidates = []
+                        if 0.0 < tau1 < 1.0:
+                            d_candidates.append(d1)
+                        if 0.0 < tau2 < 1.0:
+                            d_candidates.append(d2)
+                        if not d_candidates:
+                            continue
+                        d = min(d_candidates)
+                        min_clear = min(min_clear, d)
+                        if d < detour_plain_clear:
+                            penalty += 1.0 + (detour_plain_clear - d) / max(detour_plain_clear, 1e-4)
+                    if min_clear == float("inf"):
+                        min_clear = 999.0
+                    obj = path_len + 200.0 * penalty
+                    best_list.append((obj, min_clear, t, s, X, path_len))
+
+                best_list.sort(key=lambda x: x[0])
+                best_list = best_list[:max_scores]
+                for _, min_clear, _, s_val, _, path_len in best_list:
+                    curvature = abs(s_val) / max(L, 1e-4)
+                    f_clear = min(1.0, min_clear / (2.8 * ball_radius))
+                    f_len = 1.0 / (1.0 + path_len / (1.1 * max(L, 0.4)))
+                    f_curve = max(0.0, 1.0 - curvature / 0.9)
+                    base_cost = base_cost_max * f_clear * f_len * f_curve
+                    if base_cost > 0.0:
+                        scores.append(base_cost)
+                scores.sort(reverse=True)
+                return scores[:max_scores]
+
+            def detour_pro_scores_for_pair(pair, cue_pos, max_scores=2):
+                scores = []
+                ball_xy_local = pair["ball_xy"]
+                pocket_xy_local = pair["pocket_xy"]
+                bid = pair["bid"]
+                for axis, c_val in (
+                    ("x", 0.0),
+                    ("x", float(table.w)),
+                    ("y", 0.0),
+                    ("y", float(table.l)),
+                ):
+                    if axis == "x":
+                        if abs(pocket_xy_local[0] - c_val) < 1e-4:
+                            continue
+                    else:
+                        if abs(pocket_xy_local[1] - c_val) < 1e-4:
+                            continue
+                    mirror = _reflect_point(pocket_xy_local, axis, c_val)
+                    dir_vec = mirror - ball_xy_local
+                    dir_len = float(np.linalg.norm(dir_vec))
+                    if dir_len < 1e-6:
+                        continue
+                    if axis == "x":
+                        if abs(dir_vec[0]) < 1e-9:
+                            continue
+                        t = (c_val - ball_xy_local[0]) / dir_vec[0]
+                        if t <= 0.0 or t >= 1.0:
+                            continue
+                        bank_pt = ball_xy_local + t * dir_vec
+                        if bank_pt[1] < ball_radius or bank_pt[1] > table.l - ball_radius:
+                            continue
+                    else:
+                        if abs(dir_vec[1]) < 1e-9:
+                            continue
+                        t = (c_val - ball_xy_local[1]) / dir_vec[1]
+                        if t <= 0.0 or t >= 1.0:
+                            continue
+                        bank_pt = ball_xy_local + t * dir_vec
+                        if bank_pt[0] < ball_radius or bank_pt[0] > table.w - ball_radius:
+                            continue
+
+                    aim_xy_local = pair["aim_xy"]
+                    dist_ca = float(np.linalg.norm(aim_xy_local - cue_pos))
+                    if dist_ca < 1e-6:
+                        continue
+                    bank_dir = bank_pt - ball_xy_local
+                    dist_bb = float(np.linalg.norm(bank_dir))
+                    if dist_bb < 1e-6:
+                        continue
+                    dist_bp = float(np.linalg.norm(pocket_xy_local - bank_pt))
+                    clear_cue = min_clearance_on_segment(
+                        cue_pos, aim_xy_local, ignore_ids={"cue", bid}
+                    )
+                    clear_obj = min_clearance_on_segment(
+                        ball_xy_local, bank_pt, ignore_ids={"cue", bid}
+                    )
+                    clear_bank = min_clearance_on_segment(
+                        bank_pt, pocket_xy_local, ignore_ids={"cue", bid}
+                    )
+                    min_clear = min(clear_cue, clear_obj, clear_bank)
+                    if min_clear < detour_pro_clear:
+                        continue
+                    bank_to_pocket = pocket_xy_local - bank_pt
+                    btp_len = float(np.linalg.norm(bank_to_pocket))
+                    if btp_len < 1e-6:
+                        continue
+                    cos_turn = float(np.dot(bank_dir / dist_bb, bank_to_pocket / btp_len))
+                    cos_turn = max(-1.0, min(1.0, cos_turn))
+                    turn_angle = float(math.degrees(math.acos(cos_turn)))
+                    f_turn = max(0.0, math.cos(math.radians(turn_angle)))
+                    total_len = dist_ca + dist_bb + dist_bp
+                    f_len = 1.0 / (1.0 + total_len / (1.1 * table_scale))
+                    f_clear = min(1.0, min_clear / (3.2 * ball_radius))
+                    base_cost = base_cost_max * f_turn * f_len * f_clear
+                    if base_cost > 0.0:
+                        scores.append(base_cost)
+                scores.sort(reverse=True)
+                return scores[:max_scores]
+
+            def apply_future_gate(val):
+                gate = max(0.0, min(1.0, base_cost / base_cost_max))
+                cue_risk = float(action.get("prior_cue_risk", 0.0))
+                co_risk = float(action.get("prior_co_pocket_risk", 0.0))
+                risk_gate = 1.0 - min(0.9, max(cue_risk, co_risk))
+                gate *= max(0.0, risk_gate)
+                return val * gate
+
             target_bid = action.get("target_bid", None)
+            last_object = len(my_targets) == 1 and my_targets[0] != "8"
             point_scores = []
             for landing in landing_points:
-                scores = []
-                for pair in future_pairs:
-                    if target_bid is not None and pair["bid"] == target_bid:
+                if last_object:
+                    black_ball = balls.get("8", None)
+                    if black_ball is None or getattr(black_ball.state, "s", 0) == 4:
+                        landing_score = 0.0
+                        point_scores.append(landing_score)
                         continue
-                    score, _, _, _, _, _, _ = score_geom_pair(
-                        pair["bid"],
-                        pair["ball_xy"],
-                        pair["pocket_xy"],
-                        pair["pocket"],
-                        pair["aim_xy"],
-                        cue_pos=landing,
-                    )
-                    if score > 0.0:
-                        scores.append(score)
-                if scores:
-                    scores.sort(reverse=True)
-                    top = scores[:4]
-                    landing_score = sum(top) / len(top)
+                    black_xy = np.array(black_ball.state.rvw[0], dtype=float)[:2]
+                    black_pairs = []
+                    for pocket in table.pockets.values():
+                        pocket_xy = np.array(pocket.center, dtype=float)[:2]
+                        vec_bp = pocket_xy - black_xy
+                        dist_bp = float(np.linalg.norm(vec_bp))
+                        if dist_bp < 1e-6:
+                            continue
+                        dir_bp = vec_bp / dist_bp
+                        aim_xy_local = black_xy - dir_bp * (ball_radius * 2.0)
+                        vec_ca = aim_xy_local - landing
+                        dist_ca = float(np.linalg.norm(vec_ca))
+                        if dist_ca < 1e-6:
+                            continue
+                        score, cut_deg, window_deg, clear_cue, clear_obj, dist_bp, dist_cb = score_geom_pair(
+                            "8",
+                            black_xy,
+                            pocket_xy,
+                            pocket,
+                            aim_xy_local,
+                            cue_pos=landing,
+                        )
+                        base_phi = float(math.degrees(math.atan2(vec_ca[1], vec_ca[0])) % 360.0)
+                        black_pairs.append({
+                            "bid": "8",
+                            "ball_xy": black_xy,
+                            "pocket_xy": pocket_xy,
+                            "pocket": pocket,
+                            "aim_xy": aim_xy_local,
+                            "dist_ca": dist_ca,
+                            "dist_bp": dist_bp,
+                            "dist_cb": dist_cb,
+                            "base_phi": base_phi,
+                            "base_v0": float(np.clip(1.5 + dist_ca * 1.5, 1.0, 6.0)),
+                            "pair_score": score,
+                            "cut_deg": cut_deg,
+                            "window_deg": window_deg,
+                            "clear_cue": clear_cue,
+                            "clear_obj": clear_obj,
+                        })
+                    if not black_pairs:
+                        landing_score = 0.0
+                    else:
+                        geom_scores = [p["pair_score"] for p in black_pairs if p["pair_score"] > 0.0]
+                        geom_scores.sort(reverse=True)
+                        geom_scores = geom_scores[:8]
+                        detour_scores = []
+                        for pair in black_pairs:
+                            detour_scores.extend(detour_plain_scores_for_pair(pair, landing, max_scores=2))
+                            detour_scores.extend(detour_pro_scores_for_pair(pair, landing, max_scores=2))
+                        detour_scores.sort(reverse=True)
+                        detour_scores = detour_scores[:4]
+                        combined = geom_scores + detour_scores
+                        landing_score = sum(combined) / len(combined) if combined else 0.0
+                    point_scores.append(landing_score)
                 else:
-                    landing_score = 0.0
-                point_scores.append(landing_score)
+                    scores = []
+                    for pair in future_pairs:
+                        if target_bid is not None and pair["bid"] == target_bid:
+                            continue
+                        score, _, _, _, _, _, _ = score_geom_pair(
+                            pair["bid"],
+                            pair["ball_xy"],
+                            pair["pocket_xy"],
+                            pair["pocket"],
+                            pair["aim_xy"],
+                            cue_pos=landing,
+                        )
+                        if score > 0.0:
+                            scores.append(score)
+                    if scores:
+                        scores.sort(reverse=True)
+                        top = scores[:4]
+                        landing_score = sum(top) / len(top)
+                    else:
+                        landing_score = 0.0
+                    point_scores.append(landing_score)
 
             if not point_scores:
                 return 0.0
             avg_score = sum(point_scores) / len(point_scores)
             future_reward = (avg_score / base_cost_max) * future_reward_max
+            future_reward = apply_future_gate(future_reward)
             return float(max(0.0, min(future_reward_max, future_reward)))
 
         def finalize_action(action, base_cost, ball_xy, pocket_xy, aim_xy, is_detour):
