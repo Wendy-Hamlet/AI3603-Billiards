@@ -16,6 +16,7 @@ import sys
 import time
 import argparse
 import random
+import importlib.util
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import defaultdict
 import numpy as np
@@ -52,22 +53,56 @@ def set_cpu_affinity(core_id, num_cores):
         pass
 
 
-def create_agent(agent_type):
-    """根据类型创建 Agent"""
+def load_module_from_path(module_name, file_path):
+    """从指定路径加载模块，避免缓存冲突"""
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    module = importlib.util.module_from_spec(spec)
+    
+    # 临时添加模块目录到 sys.path（用于模块内部的相对导入）
+    module_dir = os.path.dirname(file_path)
+    if module_dir not in sys.path:
+        sys.path.insert(0, module_dir)
+    
+    spec.loader.exec_module(module)
+    return module
+
+
+def create_agent(agent_type, mcts_simulations=None, mcts_candidates=None):
+    """根据类型创建 Agent
+    
+    Args:
+        agent_type: agent 类型
+        mcts_simulations: MCTS 模拟次数 (用于 future/merge_basic/long)
+        mcts_candidates: MCTS 候选数量 (用于 future/merge_basic/long)
+    """
     # 获取项目根目录
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
     if agent_type == 'merge_basic':
         # 正确的 NewAgent 在 time_limit_mcts/agent.py 中
-        sys.path.insert(0, os.path.join(project_root, 'time_limit_mcts'))
-        from agent import NewAgent
-        # 使用默认参数
-        return NewAgent()
+        agent_path = os.path.join(project_root, 'time_limit_mcts', 'agent.py')
+        agent_module = load_module_from_path('agent_time_limit', agent_path)
+        return agent_module.NewAgent()
+    elif agent_type == 'future':
+        # Future 分支的 NewAgent (最新最强版本)
+        agent_path = os.path.join(project_root, 'future_agent', 'agent.py')
+        agent_module = load_module_from_path('agent_future', agent_path)
+        return agent_module.NewAgent()
+    elif agent_type == 'long':
+        # Long MCTS: 独立的 long_mcts 模型 (默认 64 候选, 400 模拟)
+        agent_path = os.path.join(project_root, 'long_mcts', 'agent.py')
+        agent_module = load_module_from_path('agent_long', agent_path)
+        return agent_module.NewAgent()
+    elif agent_type == 'physics':
+        # Physics-based Agent (物理模拟 agent)
+        agent_path = os.path.join(project_root, 'physics_agent', 'agent.py')
+        agent_module = load_module_from_path('agent_physics', agent_path)
+        return agent_module.NewAgent()
     elif agent_type == 'basic':
         # BasicAgent 在 time_limit_mcts/agent.py 中
-        sys.path.insert(0, os.path.join(project_root, 'time_limit_mcts'))
-        from agent import BasicAgent
-        return BasicAgent()
+        agent_path = os.path.join(project_root, 'time_limit_mcts', 'agent.py')
+        agent_module = load_module_from_path('agent_basic', agent_path)
+        return agent_module.BasicAgent()
     elif agent_type == 'pro':
         # BasicAgentPro 在 test_parallel/basic_agent_pro.py 中
         sys.path.insert(0, os.path.join(project_root, 'test_parallel'))
@@ -79,7 +114,7 @@ def create_agent(agent_type):
 
 def play_single_game(args):
     """执行单局对战"""
-    game_id, agent_a_type, agent_b_type, num_cores, seed = args
+    game_id, agent_a_type, agent_b_type, num_cores, seed, mcts_simulations, mcts_candidates = args
     
     # 设置 CPU 亲和性
     set_cpu_affinity(game_id, num_cores)
@@ -101,8 +136,8 @@ def play_single_game(args):
             env = PoolEnv()
             
             # 创建 Agent
-            agent_a = create_agent(agent_a_type)
-            agent_b = create_agent(agent_b_type)
+            agent_a = create_agent(agent_a_type, mcts_simulations, mcts_candidates)
+            agent_b = create_agent(agent_b_type, mcts_simulations, mcts_candidates)
             
             players = [agent_a, agent_b]
             target_ball_choice = ['solid', 'solid', 'stripe', 'stripe']
@@ -154,10 +189,12 @@ def main():
     parser.add_argument('--num_workers', type=int, default=80, help='并行进程数')
     parser.add_argument('--cpu_cores', type=int, default=100, help='可用 CPU 核心数')
     parser.add_argument('--agent_a', type=str, default='merge_basic', 
-                        choices=['merge_basic', 'basic', 'pro'], help='Agent A 类型')
+                        choices=['merge_basic', 'future', 'long', 'basic', 'pro', 'physics'], help='Agent A 类型')
     parser.add_argument('--agent_b', type=str, default='basic',
-                        choices=['merge_basic', 'basic', 'pro'], help='Agent B 类型')
+                        choices=['merge_basic', 'future', 'long', 'basic', 'pro', 'physics'], help='Agent B 类型')
     parser.add_argument('--timeout', type=int, default=600, help='单局超时时间（秒）')
+    parser.add_argument('--mcts_simulations', type=int, default=None, help='MCTS 模拟次数 (long agent)')
+    parser.add_argument('--mcts_candidates', type=int, default=None, help='MCTS 候选数量 (long agent)')
     args = parser.parse_args()
     
     print("=" * 60)
@@ -169,13 +206,18 @@ def main():
     print(f"  Agent A: {args.agent_a}")
     print(f"  Agent B: {args.agent_b}")
     print(f"  超时: {args.timeout}s")
+    if args.mcts_simulations:
+        print(f"  MCTS 模拟次数: {args.mcts_simulations}")
+    if args.mcts_candidates:
+        print(f"  MCTS 候选数: {args.mcts_candidates}")
     print("=" * 60)
     
     # 准备任务
     tasks = []
     for i in range(args.num_games):
         seed = random.randint(0, 2**31 - 1)
-        tasks.append((i, args.agent_a, args.agent_b, args.cpu_cores, seed))
+        tasks.append((i, args.agent_a, args.agent_b, args.cpu_cores, seed, 
+                      args.mcts_simulations, args.mcts_candidates))
     
     # 统计结果
     results = {'AGENT_A_WIN': 0, 'AGENT_B_WIN': 0, 'SAME': 0, 'ERROR': 0}
