@@ -18,8 +18,8 @@
 \usepackage{algorithmic}
 
 \title{\LARGE \bf
-Exploring AI Approaches for Billiards: \\
-From Physics Simulation to Imitation Learning
+Learning to Play Billiards: \\
+A Journey Through Reinforcement and Imitation Learning
 }
 
 \author{Abigail Jin% <-this % stops a space
@@ -35,190 +35,229 @@ From Physics Simulation to Imitation Learning
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \begin{abstract}
 
-This report documents my exploration of various AI approaches for the billiards game challenge in AI3603 course. I investigated three main directions: (1) physics-based simulation agent using geometric calculations and physics engine verification, (2) reinforcement learning with Soft Actor-Critic (SAC) algorithm, and (3) imitation learning from Monte Carlo Tree Search (MCTS) expert. While the physics-based approach achieved 60\% win rate against BasicAgent, and other learning-based methods faced significant challenges, these experiments provide valuable insights into why search-based methods like MCTS remain superior for this task. The final MCTS solution, developed collaboratively with my teammate, achieved 80.6\% win rate against BasicAgentPro.
+This report documents my systematic exploration of learning-based approaches for the billiards AI challenge. Starting from a physics-based baseline (60\% win rate), I developed a complete Soft Actor-Critic (SAC) reinforcement learning framework with curriculum learning, followed by an extensive imitation learning pipeline that collected 1.78 million expert demonstrations and experimented with five neural network architectures. While these learning approaches did not surpass the MCTS expert, the journey revealed fundamental insights about why search-based methods excel in high-precision physics tasks: the multi-modal action distribution problem in imitation learning, and the sparse reward challenge in reinforcement learning. The final MCTS solution by my teammate achieved 80.6\% against BasicAgentPro.
 
 \end{abstract}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{INTRODUCTION}
 
-Billiards presents a challenging testbed for AI decision-making due to its continuous action space, complex physics dynamics, and long-horizon planning requirements. In this project, I explored multiple AI paradigms to develop an intelligent billiards agent:
+Billiards presents a fascinating challenge for artificial intelligence: a continuous action space with five parameters (velocity, angles, spin), complex physics dynamics, and the need for both tactical precision and strategic planning. This project explores whether modern learning algorithms can master this task.
 
-\begin{itemize}
-    \item \textbf{Physics-based Agent}: Using geometric calculations and physics simulation to evaluate shot quality
-    \item \textbf{Reinforcement Learning}: Training an agent via Soft Actor-Critic (SAC) with curriculum learning
-    \item \textbf{Imitation Learning}: Learning from MCTS expert demonstrations through behavior cloning
-\end{itemize}
+I investigated three approaches in sequence:
+\begin{enumerate}
+    \item \textbf{Physics-based agent}: A baseline using geometric calculations (Section II)
+    \item \textbf{Reinforcement learning}: Training from scratch via SAC (Section III)
+    \item \textbf{Imitation learning}: Learning from MCTS expert demonstrations (Section IV)
+\end{enumerate}
 
-This report presents my methodology, experimental results, and lessons learned from each approach. While individual approaches faced limitations, the exploration informed our team's final MCTS-based solution.
+Each approach built upon lessons learned from the previous, ultimately revealing why Monte Carlo Tree Search (MCTS) remains the superior approach for this domain.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\section{PHYSICS-BASED AGENT}
+\section{PHYSICS-BASED BASELINE}
 
-\subsection{Motivation}
+Before exploring learning methods, I implemented a physics-based agent using geometric shot calculation and physics engine verification. The agent computes ``ghost ball'' positions for each target-pocket combination, evaluates cut angles, checks path obstructions, and uses pooltool simulation to verify shot feasibility.
 
-Before exploring learning-based methods, I developed a physics-based agent to establish a baseline understanding of the problem. The core insight is that billiards involves precise geometric relationships between cue ball, target ball, and pocket positions.
-
-\subsection{Methodology}
-
-The physics-based agent follows a multi-stage decision process:
-
-\textbf{1. Geometric Calculation}: For each target ball and pocket combination, compute the ``ghost ball'' position—where the cue ball must be to pocket the target:
-\begin{equation}
-\vec{p}_{ghost} = \vec{p}_{target} - 2R \cdot \hat{d}_{target \rightarrow pocket}
-\end{equation}
-where $R$ is the ball radius and $\hat{d}$ is the unit direction vector.
-
-\textbf{2. Cut Angle Evaluation}: Calculate the cut angle $\theta_{cut}$ between approach direction and target direction. Shots with $\theta_{cut} > 55°$ are rejected due to noise sensitivity.
-
-\textbf{3. Path Obstruction Check}: Verify that paths from cue to ghost ball and from target to pocket are clear, with safety margins accounting for execution noise.
-
-\textbf{4. Danger Assessment}: Identify dangerous balls (8-ball when own balls remain, opponent balls) and penalize shots that risk pocketing them.
-
-\textbf{5. Physics Simulation Verification}: Use the pooltool physics engine to simulate candidate shots with noise perturbations, selecting the most robust action.
-
-\subsection{Results}
-
-\begin{table}[h]
-\caption{Physics-based Agent vs BasicAgent (200 games)}
-\label{tab:physics_results}
-\begin{center}
-\begin{tabular}{|l|c|c|}
-\hline
-\textbf{Agent} & \textbf{Wins} & \textbf{Win Rate} \\
-\hline
-Physics Agent & 120 & 60.0\% \\
-BasicAgent & 64 & 32.0\% \\
-Draw & 16 & 8.0\% \\
-\hline
-\end{tabular}
-\end{center}
-\end{table}
-
-The physics-based agent achieved a 60\% win rate against BasicAgent, with an average of 39.1 shots per game. While promising, this approach has inherent limitations:
-
-\begin{itemize}
-    \item Greedy decision-making without long-term planning
-    \item No learning from experience
-    \item Sensitivity to complex multi-ball configurations
-\end{itemize}
-
-\subsection{Continuation by Teammate}
-
-This physics-based foundation was later extended by my teammate using Monte Carlo Tree Search (MCTS), which addresses the planning limitation by simulating future states. The MCTS approach achieved significantly better results (see Section \ref{sec:comparison}).
+This approach achieved 60\% win rate against BasicAgent, establishing a baseline understanding of the problem's requirements: precise angle calculation, obstacle awareness, and robustness to execution noise. This work was later extended by my teammate using MCTS, which achieved significantly better results through look-ahead planning.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{REINFORCEMENT LEARNING WITH SAC}
 
-\subsection{Motivation}
+\subsection{Motivation and Architecture}
 
-Reinforcement learning offers the potential to discover optimal strategies through trial-and-error interaction with the environment, without requiring expert demonstrations.
+Reinforcement learning offers the promise of discovering optimal strategies through interaction, without requiring expert knowledge. I chose Soft Actor-Critic (SAC) \cite{haarnoja2018soft} for its sample efficiency and stability in continuous action spaces.
 
-\subsection{Architecture}
+\subsubsection{State Representation}
 
-I implemented a Soft Actor-Critic (SAC) \cite{haarnoja2018soft} agent with the following components:
+I designed a 53-dimensional state encoding with semantic grouping:
 
-\textbf{State Encoder}: A 53-dimensional feature vector encoding:
 \begin{itemize}
-    \item Cue ball position and state (3 dims)
-    \item Own balls sorted by distance (7 × 3 = 21 dims)
-    \item Opponent balls sorted by distance (7 × 3 = 21 dims)
-    \item 8-ball position and state (3 dims)
-    \item Global statistics (5 dims)
+    \item \textbf{Cue ball} (3 dims): position $(x, y)$ and pocketed flag
+    \item \textbf{Own balls} (21 dims): 7 balls × 3 features, sorted by distance to cue
+    \item \textbf{Opponent balls} (21 dims): 7 balls × 3 features, sorted by distance
+    \item \textbf{8-ball} (3 dims): special handling for game-ending ball
+    \item \textbf{Global info} (5 dims): remaining counts, turn indicator, game phase
 \end{itemize}
 
-\textbf{Actor Network}: Gaussian policy outputting mean and variance for 5 continuous action parameters (V0, $\phi$, $\theta$, a, b).
+The distance-based sorting provides implicit priority hints while maintaining permutation consistency.
 
-\textbf{Critic Network}: Twin Q-networks to mitigate overestimation bias.
+\subsubsection{Network Architecture}
 
-\subsection{Reward Design}
-
+\textbf{Actor (Gaussian Policy)}:
 \begin{equation}
-r = r_{pocket} + r_{turn} + r_{foul} + r_{defense}
+\pi_\theta(a|s) = \mathcal{N}(\mu_\theta(s), \sigma_\theta(s)^2)
+\end{equation}
+Outputs mean and log-variance for 5 action dimensions: $V_0$ (velocity), $\phi$ (horizontal angle), $\theta$ (vertical angle), $a$ and $b$ (spin).
+
+\textbf{Critic (Twin Q-Networks)}:
+Two independent Q-networks to mitigate overestimation bias:
+\begin{equation}
+Q_{target} = r + \gamma \min_{i=1,2} Q_{\phi_i'}(s', a') - \alpha \log \pi(a'|s')
 \end{equation}
 
-where:
+\subsection{Reward Engineering}
+
+Reward design proved critical. I developed a multi-component reward function:
+
+\begin{equation}
+r = r_{pocket} + r_{turn} + r_{foul} + r_{defense} + r_{terminal}
+\end{equation}
+
+\textbf{Pocketing reward} uses proportional value to encourage clearing:
+\begin{equation}
+r_{pocket} = \frac{n_{pocketed}}{n_{remaining}} \times 100
+\end{equation}
+
+\textbf{Turn dynamics}: $+10$ for keeping turn, $-5$ for losing it.
+
+\textbf{Foul penalties}: $-20$ (scratch), $-15$ (wrong first contact), $-10$ (no rail), $-25$ (complete miss).
+
+\textbf{Delayed defense reward}: When opponent fails on their turn, retroactively add $+5$ to our previous action, encouraging defensive play.
+
+\textbf{Terminal rewards}: $+1000$ (win), $-1000$ (loss).
+
+\subsection{Curriculum Learning Strategy}
+
+To address the exploration challenge, I implemented three-stage curriculum learning:
+
+\textbf{Stage 1 - Foundation} (15k episodes): Train against BasicAgent only. Target: $>70\%$ win rate. Focus on learning legal shots and basic pocketing.
+
+\textbf{Stage 2 - Intermediate} (25k episodes): Mixed opponents (60\% BasicAgent, 30\% PhysicsAgent, 10\% self-play). Target: $>40\%$ against PhysicsAgent.
+
+\textbf{Stage 3 - Advanced} (30k episodes): Include MCTS opponent (20\% Basic, 30\% Physics, 20\% MCTS, 30\% self-play). Target: $>30\%$ against MCTS.
+
+\subsection{Implementation Challenges}
+
+\subsubsection{Parallel Training}
+Single-threaded training was prohibitively slow due to physics simulation. I implemented parallel environment workers with careful handling of:
 \begin{itemize}
-    \item $r_{pocket} = \frac{n_{own}}{n_{remaining}} \times 100$ for pocketing own balls
-    \item $r_{turn} = +10$ for keeping turn, $-5$ for losing turn
-    \item $r_{foul} = -20$ to $-25$ for various fouls
-    \item $r_{defense}$: delayed reward when opponent fails
+    \item NumPy/Numba float64 dtype requirements for pooltool compatibility
+    \item Process-safe replay buffer updates
+    \item Synchronized policy updates across workers
 \end{itemize}
 
-\subsection{Training Strategy}
+\subsubsection{Numerical Stability}
+The billiards environment produces occasional extreme values. I added gradient clipping, action bound enforcement, and NaN detection with automatic recovery.
 
-I employed curriculum learning with three stages:
+\subsection{Failure Analysis}
+
+Despite extensive engineering, SAC training failed to produce a competent agent. The final commit message ``RL is horrifying'' (commit \texttt{3008e3b}) summarizes months of debugging.
+
+\textbf{Root causes identified}:
+
 \begin{enumerate}
-    \item \textbf{Foundation}: 15k episodes vs BasicAgent
-    \item \textbf{Intermediate}: 25k episodes vs mixed opponents
-    \item \textbf{Advanced}: 30k episodes including self-play
+    \item \textbf{Sparse, delayed rewards}: Meaningful feedback only occurs after complete physics simulation. The agent receives no gradient signal for ``almost good'' shots.
+    
+    \item \textbf{High precision requirements}: A 1° error in $\phi$ angle can mean the difference between pocketing and missing entirely. The reward landscape is essentially discontinuous.
+    
+    \item \textbf{Exploration inefficiency}: Random Gaussian exploration in 5D continuous space almost never produces successful pockets, providing no learning signal during early training.
+    
+    \item \textbf{Credit assignment}: With 20+ shots per game and delayed terminal rewards, attributing success to specific actions is extremely difficult.
 \end{enumerate}
 
-\subsection{Challenges and Failure Analysis}
-
-Despite extensive implementation effort, SAC training faced fundamental challenges:
-
-\textbf{1. Sparse and Delayed Rewards}: Billiards provides feedback only after physics simulation completes, making credit assignment difficult for the 5-dimensional action space.
-
-\textbf{2. High-Precision Requirements}: Small errors in action parameters (especially $\phi$ angle) lead to completely different outcomes, creating a highly non-smooth reward landscape.
-
-\textbf{3. Exploration Inefficiency}: Random exploration in continuous action space rarely produces successful pockets, providing no learning signal.
-
-The final commit message ``RL is horrifying'' (commit \texttt{3008e3b}) summarizes the experience. After significant debugging of parallel training, reward shaping, and network architectures, the agent failed to learn meaningful policies.
-
-\subsection{Lessons Learned}
-
-This negative result provides valuable insight: for tasks requiring high-precision continuous control with delayed feedback, end-to-end RL may require prohibitive sample complexity. Search-based methods that can evaluate outcomes through simulation are more appropriate.
+\textbf{Lesson learned}: For tasks requiring high-precision continuous control with binary outcomes, end-to-end RL may require prohibitive sample complexity. The availability of a fast simulator makes search-based methods far more practical.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{IMITATION LEARNING}
 
-\subsection{Motivation}
+Given RL's failure, I pivoted to imitation learning: directly learning from the strong MCTS agent developed by my teammate.
 
-Given the RL challenges, I explored imitation learning to leverage the strong MCTS expert developed by my teammate. The goal was to distill MCTS's search capability into a fast neural network policy.
+\subsection{Expert Data Collection}
 
-\subsection{Data Collection}
+\subsubsection{Data Collection Pipeline}
 
-I collected 1,787,130 state-action pairs from the long\_mcts agent (400 simulations, 64 candidates) playing against BasicAgent:
-
-\textbf{State Features (80 dimensions)}:
+I implemented a parallel data collection system using ProcessPoolExecutor:
 \begin{itemize}
-    \item Cue ball: position (x, y) + pocketed flag (3 dims)
-    \item 15 balls: position + pocketed flag (45 dims)
-    \item Target ball mask (15 dims)
-    \item 6 pocket positions (12 dims)
-    \item Game statistics (5 dims)
+    \item Expert: long\_mcts agent (400 simulations, 64 candidates)
+    \item Opponent: BasicAgent (to generate diverse game states)
+    \item Collection rate: $\sim$100 games/hour with 100 workers
+    \item Total dataset: \textbf{1,787,130 state-action pairs}
 \end{itemize}
 
-\textbf{Action Labels (6 dimensions)}:
+\subsubsection{State Features (80 dimensions)}
+
+I designed a comprehensive state representation:
+
 \begin{itemize}
-    \item V0 (normalized): initial velocity
-    \item $\sin(\phi), \cos(\phi)$: horizontal angle encoding
-    \item $\theta$ (normalized): vertical angle
-    \item a, b: spin parameters
+    \item \textbf{Cue ball} (3 dims): $(x, y, pocketed)$
+    \item \textbf{15 object balls} (45 dims): $(x_i, y_i, pocketed_i)$ for $i \in \{1..15\}$
+    \item \textbf{Target mask} (15 dims): binary indicators for valid target balls
+    \item \textbf{Pocket positions} (12 dims): $(x_j, y_j)$ for 6 pockets
+    \item \textbf{Game statistics} (5 dims): remaining own/opponent balls, targeting 8-ball flag, 8-ball pocketed, target count
+\end{itemize}
+
+Pocketed balls are encoded as $(0, 0, 1)$ to distinguish from balls at origin.
+
+\subsubsection{Action Labels (6 dimensions)}
+
+\begin{itemize}
+    \item $V_0 \in [0.5, 8.0]$: normalized to $[0, 1]$
+    \item $\phi \in [0°, 360°]$: encoded as $(\sin\phi, \cos\phi)$ to handle wraparound
+    \item $\theta \in [0°, 90°]$: normalized to $[0, 1]$
+    \item $a, b \in [-0.5, 0.5]$: spin parameters, kept as-is
 \end{itemize}
 
 \subsection{Network Architectures}
 
-I experimented with multiple architectures:
+I experimented with five architectures of increasing sophistication:
 
-\textbf{1. MLP Networks}: Simple feedforward networks with varying capacities (8M to 26M parameters).
+\subsubsection{Architecture 1: MLP Networks}
 
-\textbf{2. Transformer-based}: Ball embeddings with multi-head attention, treating the problem as set prediction.
-
-\textbf{3. Discrete $\phi$ Classification}: Converting the angle regression to 72-bin classification to handle multi-modal actions.
-
-\textbf{4. Equivariant Network}: Exploiting the permutation symmetry of balls using Set Attention.
-
-\subsection{Data Augmentation}
-
-I applied geometric symmetry transformations to increase training data 4×:
+Simple feedforward networks with varying capacities:
 \begin{itemize}
-    \item Original data
-    \item X-axis mirror: $(y \rightarrow 1-y, \phi \rightarrow -\phi)$
-    \item Y-axis mirror: $(x \rightarrow 1-x, \phi \rightarrow 180°-\phi)$
-    \item 180° rotation: $(x \rightarrow 1-x, y \rightarrow 1-y, \phi \rightarrow \phi+180°)$
+    \item \textbf{Small}: 8M parameters, 4 hidden layers × 512 units
+    \item \textbf{Large}: 26M parameters, 6 hidden layers × 1024 units
 \end{itemize}
+
+Loss function: weighted MSE
+\begin{equation}
+\mathcal{L} = \mathcal{L}_{V_0} + 2\mathcal{L}_{\phi} + \mathcal{L}_{\theta} + 0.5\mathcal{L}_{spin}
+\end{equation}
+where $\mathcal{L}_{\phi}$ includes angle regularization:
+\begin{equation}
+\mathcal{L}_{\phi} = MSE(\sin\phi) + MSE(\cos\phi) + 0.1\|\sin^2\phi + \cos^2\phi - 1\|^2
+\end{equation}
+
+\subsubsection{Architecture 2: Transformer-based}
+
+Treating balls as a set, I used:
+\begin{itemize}
+    \item Ball embeddings (position + type encoding)
+    \item Multi-head self-attention (8 heads)
+    \item Global pooling → action prediction heads
+\end{itemize}
+
+\subsubsection{Architecture 3: Discrete $\phi$ Classification}
+
+Recognizing that the $\phi$ angle is the most critical and error-prone parameter, I converted it from regression to classification:
+\begin{itemize}
+    \item 72 bins (5° resolution)
+    \item CrossEntropy loss for $\phi$, MSE for others
+    \item Added LayerNorm and logit clamping for numerical stability
+\end{itemize}
+
+\subsubsection{Architecture 4: Augmented Training}
+
+Applied geometric symmetry transformations to 4× the training data:
+\begin{itemize}
+    \item Original
+    \item X-mirror: $y \rightarrow 1-y$, $\phi \rightarrow -\phi$
+    \item Y-mirror: $x \rightarrow 1-x$, $\phi \rightarrow 180°-\phi$
+    \item 180° rotation: $x \rightarrow 1-x$, $y \rightarrow 1-y$, $\phi \rightarrow \phi+180°$
+\end{itemize}
+
+\subsubsection{Architecture 5: Equivariant Network}
+
+To exploit the permutation symmetry of object balls, I designed a Set Attention architecture:
+\begin{itemize}
+    \item \textbf{BallEncoder}: shared MLP for each ball
+    \item \textbf{SetAttentionBlocks}: self-attention over ball set (8 layers)
+    \item \textbf{CrossAttention}: cue ball queries all object balls
+    \item \textbf{Target-weighted pooling}: emphasize balls in target mask
+    \item Separate heads for $V_0$, $\phi$ (72 bins), $\theta$, spin
+\end{itemize}
+
+Key insight: the network should be invariant to ball permutation but should leverage target mask information to focus on relevant balls.
 
 \subsection{Training Results}
 
@@ -226,111 +265,140 @@ I applied geometric symmetry transformations to increase training data 4×:
 \caption{Imitation Learning Training Results}
 \label{tab:il_results}
 \begin{center}
-\begin{tabular}{|l|c|c|c|}
+\begin{tabular}{|l|c|c|c|c|}
 \hline
-\textbf{Model} & \textbf{Params} & \textbf{Val Loss} & \textbf{Epoch} \\
+\textbf{Model} & \textbf{Params} & \textbf{Val Loss} & \textbf{Best Epoch} & \textbf{$\phi$ Acc} \\
 \hline
-Large MLP & 26M & 0.547 & 40 \\
-Small MLP & 8M & 0.663 & 47 \\
-Aug Small & 8M & 0.636 & 106 \\
-Discrete 72bins & 26M & 5.55 & 1 \\
-Equivariant & 26M & 2.97 & 25 \\
+Large MLP & 26M & 0.547 & 40 & - \\
+Small MLP & 8M & 0.663 & 47 & - \\
+Aug Small & 8M & 0.636 & 106 & - \\
+Discrete 72 & 26M & 5.55 & 1 & - \\
+Equivariant & 26M & 2.97 & 25 & 16\% \\
 \hline
 \end{tabular}
 \end{center}
 \end{table}
 
-\subsection{Challenges and Analysis}
+\subsection{The Multi-Modal Action Problem}
 
-\textbf{1. Multi-modal Action Distribution}: The MCTS expert may choose different but equally good shots for similar states. With MSE loss, the network learns to average these actions, producing suboptimal predictions.
+The fundamental challenge became clear through analysis: \textbf{for any given state, multiple distinct actions can be equally optimal}.
 
-\textbf{2. Overfitting}: Despite augmentation and regularization, models showed clear train-validation gaps, indicating insufficient coverage of the state space.
+Consider a state where either Ball 3 or Ball 7 could be pocketed. The MCTS expert might choose Ball 3 in some games and Ball 7 in others, depending on subtle factors or randomness in its search. These correspond to completely different $\phi$ angles (e.g., 45° vs 220°).
 
-\textbf{3. Angle Accuracy}: The critical $\phi$ angle showed only 15-16\% accuracy in discrete classification, far below what's needed for reliable pocketing.
+When training with MSE loss, the network learns to \textit{average} these actions:
+\begin{equation}
+\hat{\phi} = \frac{\phi_{Ball3} + \phi_{Ball7}}{2} \approx 132.5°
+\end{equation}
+
+This averaged action pockets \textit{neither} ball. The network achieves low training loss by predicting the mean of a multi-modal distribution, but this mean is not a valid action.
+
+\textbf{Attempted solutions}:
+\begin{enumerate}
+    \item \textbf{Discrete $\phi$}: Converting to classification helps but 72 bins still show only 16\% accuracy
+    \item \textbf{Mixture Density Networks}: Would model multiple modes but adds complexity
+    \item \textbf{Target conditioning}: If we knew which ball to target, the problem becomes unimodal
+\end{enumerate}
+
+\subsection{Overfitting Analysis}
+
+All models showed classic overfitting patterns:
+\begin{itemize}
+    \item Training loss continued decreasing
+    \item Validation loss plateaued or increased
+    \item Gap widened over epochs
+\end{itemize}
+
+This suggests that 1.78M samples, while large, do not adequately cover the state space for generalization. The billiards state space is effectively infinite, and expert behavior varies based on factors not captured in our 80-dimensional encoding.
 
 \subsection{Lessons Learned}
 
-Imitation learning struggles with multi-modal expert behavior. While the network learns general patterns, it cannot capture the precise decision logic of MCTS. Alternative approaches like:
-\begin{itemize}
-    \item DAgger \cite{ross2011reduction} for distribution shift
-    \item Conditional behavior cloning
-    \item Mixture density networks
-\end{itemize}
-might help but require significant additional complexity.
+\begin{enumerate}
+    \item \textbf{Multi-modal distributions defeat MSE}: Behavior cloning struggles when experts exhibit varied behavior for similar states.
+    
+    \item \textbf{Angle accuracy is critical}: With 72 bins (5° each), 16\% accuracy means expected error of $\sim$15 bins = 75°, far too large for precise pocketing.
+    
+    \item \textbf{Distribution shift}: Even with 1.78M samples, the learned policy visits states not seen during training, leading to compounding errors.
+    
+    \item \textbf{The right inductive bias matters}: Equivariant networks should help with symmetry, but the core multi-modal problem remains.
+\end{enumerate}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{COMPARATIVE ANALYSIS}
-\label{sec:comparison}
 
 \begin{table}[h]
-\caption{All Agents vs BasicAgentPro}
+\caption{Agent Performance Comparison}
 \label{tab:comparison}
 \begin{center}
 \begin{tabular}{|l|c|c|}
 \hline
-\textbf{Agent} & \textbf{Win Rate} & \textbf{Avg Shots} \\
+\textbf{Agent} & \textbf{vs Basic} & \textbf{vs Pro} \\
 \hline
-Physics-based & $\sim$40\%* & 39+ \\
+Physics-based & 60\% & ~40\%* \\
 SAC (RL) & Failed & - \\
 Imitation Learning & Not tested & - \\
 \hline
-merge\_basic (MCTS) & 56.2\% & - \\
-future (MCTS) & 58.2\% & 19.2 \\
-\textbf{long\_mcts (MCTS)} & \textbf{80.6\%} & \textbf{15.6} \\
+BasicAgentPro & 85.4\% & - \\
+future (MCTS) & 57.3\% & 33.1\% \\
+\textbf{long\_mcts} & \textbf{94.4\%} & \textbf{80.6\%} \\
 \hline
 \end{tabular}
 \end{center}
-\footnotesize{*Estimated from BasicAgent results}
+\footnotesize{*Estimated}
 \end{table}
 
-The MCTS-based agents, developed by my teammate, significantly outperform all my learning-based approaches. Key advantages of MCTS include:
+The results demonstrate that MCTS-based agents significantly outperform all learning approaches. Key advantages:
 
 \begin{itemize}
-    \item \textbf{Look-ahead Planning}: Evaluates future consequences of actions
-    \item \textbf{Robustness}: Tests actions with noise perturbations
-    \item \textbf{No Training Required}: Works directly from physics simulation
+    \item \textbf{Look-ahead}: Evaluates consequences of actions through simulation
+    \item \textbf{No training}: Works directly from physics engine
+    \item \textbf{Handles multi-modality}: Naturally explores multiple shot options
+    \item \textbf{Robustness}: Can test actions with noise perturbations
 \end{itemize}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{CONCLUSION}
 
-This project explored three AI paradigms for billiards:
+This project systematically explored learning-based approaches for billiards AI:
 
 \begin{enumerate}
-    \item \textbf{Physics Simulation}: Provided baseline understanding; 60\% vs BasicAgent
-    \item \textbf{Reinforcement Learning}: Failed due to sparse rewards and exploration challenges
-    \item \textbf{Imitation Learning}: Limited by multi-modal actions and distribution mismatch
+    \item \textbf{Reinforcement Learning}: Developed complete SAC framework with curriculum learning, but failed due to sparse rewards and exploration challenges in high-precision continuous control.
+    
+    \item \textbf{Imitation Learning}: Collected 1.78M expert samples, experimented with 5 architectures, but fundamental multi-modal action distribution problem limits accuracy.
+    
+    \item \textbf{Key Insight}: When a fast, accurate simulator is available, search-based methods (MCTS) outperform learning methods. The simulator enables direct evaluation of action consequences, bypassing the credit assignment and multi-modality challenges that plague learning.
 \end{enumerate}
 
-The key insight is that for high-precision physics tasks with available simulators, search-based methods like MCTS are more effective than learning-based approaches. The final solution achieving 80.6\% win rate against BasicAgentPro was developed collaboratively, with my teammate focusing on MCTS optimization while I explored alternative paradigms.
+The negative results are themselves valuable: they demonstrate the boundaries of current learning methods and highlight the importance of matching algorithm choice to problem structure.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section*{CONTRIBUTIONS}
 
 \textbf{My contributions}:
 \begin{itemize}
-    \item Physics-based agent design and implementation
-    \item SAC reinforcement learning framework
-    \item Imitation learning data collection (1.78M samples) and training
-    \item Parallel evaluation framework for testing
-    \item Experimental analysis and documentation
+    \item Physics-based agent baseline (60\% vs Basic)
+    \item Complete SAC reinforcement learning framework with parallel training
+    \item Imitation learning pipeline: data collection (1.78M samples), 5 network architectures, training infrastructure
+    \item Parallel evaluation framework for agent comparison
+    \item Analysis of failure modes and lessons learned
 \end{itemize}
 
 \textbf{Teammate's contributions}:
 \begin{itemize}
     \item MCTS agent development and optimization
     \item Robustness improvements and future reward design
-    \item Final solution achieving 80.6\% win rate
+    \item Final long\_mcts solution (80.6\% vs BasicAgentPro)
 \end{itemize}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \begin{thebibliography}{99}
 
-\bibitem{haarnoja2018soft} T. Haarnoja et al., ``Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor,'' ICML 2018.
+\bibitem{haarnoja2018soft} T. Haarnoja, A. Zhou, P. Abbeel, and S. Levine, ``Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor,'' in \textit{Proc. ICML}, 2018.
 
-\bibitem{ross2011reduction} S. Ross et al., ``A Reduction of Imitation Learning and Structured Prediction to No-Regret Online Learning,'' AISTATS 2011.
+\bibitem{ross2011reduction} S. Ross, G. Gordon, and D. Bagnell, ``A Reduction of Imitation Learning and Structured Prediction to No-Regret Online Learning,'' in \textit{Proc. AISTATS}, 2011.
 
-\bibitem{silver2016mastering} D. Silver et al., ``Mastering the Game of Go with Deep Neural Networks and Tree Search,'' Nature 2016.
+\bibitem{silver2016mastering} D. Silver et al., ``Mastering the Game of Go with Deep Neural Networks and Tree Search,'' \textit{Nature}, vol. 529, pp. 484-489, 2016.
+
+\bibitem{zaheer2017deep} M. Zaheer et al., ``Deep Sets,'' in \textit{Proc. NeurIPS}, 2017.
 
 \end{thebibliography}
 
