@@ -46,7 +46,7 @@ Billiards presents a fascinating challenge for artificial intelligence: a contin
 
 I investigated three approaches in sequence:
 \begin{enumerate}
-    \item \textbf{Physics-based agent}: A baseline using geometric calculations (Section II)
+    \item \textbf{Baseline analysis}: Physics-based agent and opponent robustness study (Section II)
     \item \textbf{Reinforcement learning}: Training from scratch via SAC (Section III)
     \item \textbf{Imitation learning}: Learning from MCTS expert demonstrations (Section IV)
 \end{enumerate}
@@ -54,11 +54,41 @@ I investigated three approaches in sequence:
 Each approach built upon lessons learned from the previous, ultimately revealing why Monte Carlo Tree Search (MCTS) remains the superior approach for this domain.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\section{PHYSICS-BASED BASELINE}
+\section{BASELINE AGENTS AND OPPONENT ANALYSIS}
+
+\subsection{Physics-Based Baseline}
 
 Before exploring learning methods, I implemented a physics-based agent using geometric shot calculation and physics engine verification. The agent computes ``ghost ball'' positions for each target-pocket combination, evaluates cut angles, checks path obstructions, and uses pooltool simulation to verify shot feasibility.
 
 This approach achieved 60\% win rate against BasicAgent, establishing a baseline understanding of the problem's requirements: precise angle calculation, obstacle awareness, and robustness to execution noise. This work was later extended by my teammate using MCTS, which achieved significantly better results through look-ahead planning.
+
+\subsection{Opponent Robustness Analysis}
+
+To understand the baseline agents we compete against, I designed a robustness test using a \texttt{RandomAgent} that only makes weak random shots (velocity 0.5--1.5 m/s, random direction). A robust agent should win nearly 100\% against such a trivial opponent that almost never pockets balls.
+
+\begin{table}[h]
+\caption{Robustness Test: Baseline Agents vs RandomAgent (1000 games)}
+\label{tab:robustness}
+\begin{center}
+\begin{tabular}{|l|c|c|c|}
+\hline
+\textbf{Agent} & \textbf{Win Rate} & \textbf{Loss Rate} & \textbf{Avg Shots} \\
+\hline
+BasicAgent & 78.8\% & 21.2\% & 23.8 \\
+BasicAgentPro & 81.7\% & 18.2\% & 23.9 \\
+\hline
+\end{tabular}
+\end{center}
+\end{table}
+
+\textbf{Key finding}: Even against a nearly-passive opponent, both agents lose approximately 20\% of games. Since \texttt{RandomAgent} almost never pockets balls intentionally, these losses occur when the baseline agent accidentally:
+\begin{enumerate}
+    \item Pockets the 8-ball prematurely (before clearing own balls)
+    \item Scratches (pockets cue ball) while pocketing the 8-ball
+    \item Makes other foul-related errors leading to loss
+\end{enumerate}
+
+This 20\% ``self-defeat'' rate reveals a fundamental limitation of greedy optimization approaches: they pursue high-reward pocketing actions without adequately considering game-ending foul risks. This insight motivated our exploration of look-ahead methods (MCTS) and learning-based approaches that could potentially learn safer strategies.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{REINFORCEMENT LEARNING WITH SAC}
@@ -114,7 +144,7 @@ r_{pocket} = \frac{n_{pocketed}}{n_{remaining}} \times 100
 
 \textbf{Delayed defense reward}: When opponent fails on their turn, retroactively add $+5$ to our previous action, encouraging defensive play.
 
-\textbf{Terminal rewards}: $+1000$ (win), $-1000$ (loss).
+\textbf{Terminal rewards}: Experimented with $\pm 1000$ (large) and $\pm 100$ (compact). Draw penalty was a critical design variable explored in Section III-E.
 
 \subsection{Curriculum Learning Strategy}
 
@@ -139,23 +169,103 @@ Single-threaded training was prohibitively slow due to physics simulation. I imp
 \subsubsection{Numerical Stability}
 The billiards environment produces occasional extreme values. I added gradient clipping, action bound enforcement, and NaN detection with automatic recovery.
 
-\subsection{Failure Analysis}
+\subsection{Experimental Analysis}
 
-Despite extensive engineering, SAC training failed to produce a competent agent. The final commit message ``RL is horrifying'' (commit \texttt{3008e3b}) summarizes months of debugging.
+Despite extensive engineering, SAC training failed to produce a competent agent. To understand the failure modes, I conducted three controlled experiments in a simplified 4-ball scenario (1 own ball, 1 enemy ball, 8-ball, cue ball) with self-play training.
 
-\textbf{Root causes identified}:
+\subsubsection{Experiment 1: Large Reward ($\pm$1000)}
 
+Initial training used large terminal rewards ($\pm 1000$ for win/loss). The hypothesis was that stronger reward signals would accelerate learning.
+
+\begin{table}[h]
+\caption{Experiment 1: Large Reward Training (200,000 games)}
+\label{tab:exp1}
+\begin{center}
+\begin{tabular}{|r|c|c|c|c|}
+\hline
+\textbf{Games} & \textbf{A Win} & \textbf{B Win} & \textbf{Draw} & \textbf{Pockets} \\
+\hline
+800 & 45\% & 46\% & 9\% & 0.53 \\
+8,000 & 26\% & 26\% & 48\% & 0.25 \\
+200,000 & 25\% & 25\% & \textbf{51\%} & 0.32 \\
+\hline
+\end{tabular}
+\end{center}
+\end{table}
+
+\textbf{Result}: Despite 200,000 training games, the agent converged to a ``lazy'' equilibrium with 51\% draw rate. The agent learned to avoid risky shots, preferring to prolong games until the 60-shot limit.
+
+\subsubsection{Experiment 2: Compact Reward ($\pm$100)}
+
+Reduced terminal rewards to $\pm 100$, hypothesizing that smaller magnitudes might stabilize training.
+
+\begin{table}[h]
+\caption{Experiment 2: Compact Reward Training (20,000 games)}
+\label{tab:exp2}
+\begin{center}
+\begin{tabular}{|r|c|c|c|c|}
+\hline
+\textbf{Games} & \textbf{A Win} & \textbf{B Win} & \textbf{Draw} & \textbf{Active} \\
+\hline
+800 & 46\% & 44\% & 10\% & 90\% \\
+8,000 & 27\% & 27\% & 46\% & 54\% \\
+20,000 & 26\% & 26\% & \textbf{47\%} & 52\% \\
+\hline
+\end{tabular}
+\end{center}
+\end{table}
+
+\textbf{Result}: Similar convergence pattern---reward scaling alone does not address the core problem.
+
+\subsubsection{Experiment 3: Strict Draw Penalty}
+
+Modified reward to penalize draws as severely as losses (draw = $-100$).
+
+\begin{table}[h]
+\caption{Experiment 3: Strict Draw Penalty (20,000 games)}
+\label{tab:exp3}
+\begin{center}
+\begin{tabular}{|r|c|c|c|c|}
+\hline
+\textbf{Games} & \textbf{A Win} & \textbf{B Win} & \textbf{Draw} & \textbf{Active} \\
+\hline
+800 & 45\% & 44\% & 11\% & 89\% \\
+8,000 & 25\% & 26\% & 49\% & 51\% \\
+20,000 & 32\% & 32\% & \textbf{36\%} & \textbf{64\%} \\
+\hline
+\end{tabular}
+\end{center}
+\end{table}
+
+\textbf{Result}: Strict draw penalty successfully reduced draw rate to 36\%, demonstrating that \textbf{reward structure matters more than reward magnitude}.
+
+\subsubsection{Training Curves}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.48\textwidth]{figures/sac_experiments_comparison.pdf}
+\caption{SAC training comparison. Top-left: Draw rate over training. Top-right: Win rate. All experiments show initial active play followed by convergence toward conservative equilibria, with Experiment 3 (strict draw penalty) achieving lowest final draw rate.}
+\label{fig:sac_curves}
+\end{figure}
+
+\subsection{Root Cause Analysis}
+
+\textbf{Why does the ``lazy'' equilibrium emerge?} In billiards, attempting to pocket a ball carries risk: missing might leave an easy shot for the opponent, and prematurely pocketing the 8-ball ends the game in a loss. The agent discovers that \textit{not acting decisively} is a stable strategy in symmetric self-play.
+
+\textbf{Fundamental limitations}:
 \begin{enumerate}
-    \item \textbf{Sparse, delayed rewards}: Meaningful feedback only occurs after complete physics simulation. The agent receives no gradient signal for ``almost good'' shots.
+    \item \textbf{Sparse, delayed rewards}: Meaningful feedback only occurs after complete physics simulation. No gradient signal for ``almost good'' shots.
     
-    \item \textbf{High precision requirements}: A 1° error in $\phi$ angle can mean the difference between pocketing and missing entirely. The reward landscape is essentially discontinuous.
+    \item \textbf{High precision requirements}: A 1° error in $\phi$ can mean the difference between pocketing and missing. The reward landscape is discontinuous.
     
-    \item \textbf{Exploration inefficiency}: Random Gaussian exploration in 5D continuous space almost never produces successful pockets, providing no learning signal during early training.
+    \item \textbf{Exploration inefficiency}: Random Gaussian exploration in 5D space almost never produces successful pockets.
     
-    \item \textbf{Credit assignment}: With 20+ shots per game and delayed terminal rewards, attributing success to specific actions is extremely difficult.
+    \item \textbf{Credit assignment}: With 20+ shots per game, attributing terminal rewards to specific actions is extremely difficult.
+    
+    \item \textbf{Self-play dynamics}: Symmetric training finds Nash equilibria that may be suboptimal against fixed opponents.
 \end{enumerate}
 
-\textbf{Lesson learned}: For tasks requiring high-precision continuous control with binary outcomes, end-to-end RL may require prohibitive sample complexity. The availability of a fast simulator makes search-based methods far more practical.
+\textbf{Lesson learned}: For high-precision continuous control with binary outcomes, end-to-end RL requires prohibitive sample complexity. When a fast simulator is available, search-based methods are far more practical.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{IMITATION LEARNING}
@@ -349,10 +459,10 @@ future (MCTS) & 57.3\% & 33.1\% \\
 The results demonstrate that MCTS-based agents significantly outperform all learning approaches. Key advantages:
 
 \begin{itemize}
-    \item \textbf{Look-ahead}: Evaluates consequences of actions through simulation
-    \item \textbf{No training}: Works directly from physics engine
-    \item \textbf{Handles multi-modality}: Naturally explores multiple shot options
-    \item \textbf{Robustness}: Can test actions with noise perturbations
+    \item \textbf{Look-ahead}: Evaluates consequences of actions through simulation, avoiding the 20\% ``self-defeat'' rate observed in greedy baselines (Section II-B)
+    \item \textbf{No training required}: Works directly from physics engine without sample collection
+    \item \textbf{Handles multi-modality}: Naturally explores multiple shot options, bypassing the averaging problem in imitation learning
+    \item \textbf{Robustness}: Can test actions with noise perturbations before execution
 \end{itemize}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -375,11 +485,13 @@ The negative results are themselves valuable: they demonstrate the boundaries of
 
 \textbf{My contributions}:
 \begin{itemize}
-    \item Physics-based agent baseline (60\% vs Basic)
+    \item Physics-based agent baseline (60\% win rate vs BasicAgent)
+    \item Opponent robustness analysis revealing 20\% self-defeat rate in baselines
     \item Complete SAC reinforcement learning framework with parallel training
-    \item Imitation learning pipeline: data collection (1.78M samples), 5 network architectures, training infrastructure
-    \item Parallel evaluation framework for agent comparison
-    \item Analysis of failure modes and lessons learned
+    \item Three controlled RL experiments analyzing reward structure effects
+    \item Imitation learning pipeline: data collection (1.78M samples), 5 network architectures
+    \item Parallel evaluation framework for systematic agent comparison
+    \item Comprehensive analysis of learning method failure modes
 \end{itemize}
 
 \textbf{Teammate's contributions}:
