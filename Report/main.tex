@@ -292,7 +292,7 @@ Modified reward to penalize draws as severely as losses (draw = $-100$).
 \begin{enumerate}
     \item \textbf{Sparse, delayed rewards}: Meaningful feedback only occurs after complete physics simulation. No gradient signal for ``almost good'' shots.
     
-    \item \textbf{High precision requirements}: A 1° error in $\phi$ can mean the difference between pocketing and missing. The reward landscape is discontinuous.
+    \item \textbf{High precision requirements}: A $1^\circ$ error in $\phi$ can mean the difference between pocketing and missing. The reward landscape is discontinuous.
     
     \item \textbf{Exploration inefficiency}: Random Gaussian exploration in 5D space almost never produces successful pockets.
     
@@ -338,8 +338,8 @@ Pocketed balls are encoded as $(0, 0, 1)$ to distinguish from balls at origin.
 
 \begin{itemize}
     \item $V_0 \in [0.5, 8.0]$: normalized to $[0, 1]$
-    \item $\phi \in [0°, 360°]$: encoded as $(\sin\phi, \cos\phi)$ to handle wraparound
-    \item $\theta \in [0°, 90°]$: normalized to $[0, 1]$
+    \item $\phi \in [0^\circ, 360^\circ]$: encoded as $(\sin\phi, \cos\phi)$ to handle wraparound
+    \item $\theta \in [0^\circ, 90^\circ]$: normalized to $[0, 1]$
     \item $a, b \in [-0.5, 0.5]$: spin parameters, kept as-is
 \end{itemize}
 
@@ -377,7 +377,7 @@ Treating balls as a set, I used:
 
 Recognizing that the $\phi$ angle is the most critical and error-prone parameter, I converted it from regression to classification:
 \begin{itemize}
-    \item 72 bins (5° resolution)
+    \item 72 bins ($5^\circ$ resolution)
     \item CrossEntropy loss for $\phi$, MSE for others
     \item Added LayerNorm and logit clamping for numerical stability
 \end{itemize}
@@ -388,8 +388,8 @@ Applied geometric symmetry transformations to 4× the training data:
 \begin{itemize}
     \item Original
     \item X-mirror: $y \rightarrow 1-y$, $\phi \rightarrow -\phi$
-    \item Y-mirror: $x \rightarrow 1-x$, $\phi \rightarrow 180°-\phi$
-    \item 180° rotation: $x \rightarrow 1-x$, $y \rightarrow 1-y$, $\phi \rightarrow \phi+180°$
+    \item Y-mirror: $x \rightarrow 1-x$, $\phi \rightarrow 180^\circ-\phi$
+    \item $180^\circ$ rotation: $x \rightarrow 1-x$, $y \rightarrow 1-y$, $\phi \rightarrow \phi+180^\circ$
 \end{itemize}
 
 \subsubsection{Architecture 5: Equivariant Network}
@@ -429,11 +429,11 @@ Equivariant & 26M & 2.97 & 25 & 16\% \\
 
 The fundamental challenge became clear through analysis: \textbf{for any given state, multiple distinct actions can be equally optimal}.
 
-Consider a state where either Ball 3 or Ball 7 could be pocketed. The MCTS expert might choose Ball 3 in some games and Ball 7 in others, depending on subtle factors or randomness in its search. These correspond to completely different $\phi$ angles (e.g., 45° vs 220°).
+Consider a state where either Ball 3 or Ball 7 could be pocketed. The MCTS expert might choose Ball 3 in some games and Ball 7 in others, depending on subtle factors or randomness in its search. These correspond to completely different $\phi$ angles (e.g., $45^\circ$ vs $220^\circ$).
 
 When training with MSE loss, the network learns to \textit{average} these actions:
 \begin{equation}
-\hat{\phi} = \frac{\phi_{Ball3} + \phi_{Ball7}}{2} \approx 132.5°
+\hat{\phi} = \frac{\phi_{Ball3} + \phi_{Ball7}}{2} \approx 132.5^\circ
 \end{equation}
 
 This averaged action pockets \textit{neither} ball. The network achieves low training loss by predicting the mean of a multi-modal distribution, but this mean is not a valid action.
@@ -461,7 +461,7 @@ This suggests that 1.78M samples, while large, do not adequately cover the state
 \begin{enumerate}
     \item \textbf{Multi-modal distributions defeat MSE}: Behavior cloning struggles when experts exhibit varied behavior for similar states.
     
-    \item \textbf{Angle accuracy is critical}: With 72 bins (5° each), 16\% accuracy means expected error of $\sim$15 bins = 75°, far too large for precise pocketing.
+    \item \textbf{Angle accuracy is critical}: With 72 bins ($5^\circ$ each), 16\% accuracy means expected error of $\sim$15 bins = $75^\circ$, far too large for precise pocketing.
     
     \item \textbf{Distribution shift}: Even with 1.78M samples, the learned policy visits states not seen during training, leading to compounding errors.
     
@@ -551,9 +551,9 @@ The negative results are themselves valuable: they demonstrate the boundaries of
 \end{thebibliography}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\appendix
+\section*{APPENDIX}
 
-\section{Hyperparameters}
+\subsection*{A. Hyperparameters}
 \label{app:hyperparams}
 
 \begin{table}[h]
@@ -663,10 +663,10 @@ LR scheduler & ReduceOnPlateau \\
 \end{center}
 \end{table}
 
-\section{State and Action Space Details}
+\subsection*{B. State and Action Space Details}
 \label{app:spaces}
 
-\subsection{SAC State Encoding (53 dimensions)}
+\subsubsection*{SAC State Encoding (53 dimensions)}
 
 \begin{table}[h]
 \begin{center}
@@ -686,13 +686,13 @@ Game info & 5 & counts, phase, turn \\
 \end{center}
 \end{table}
 
-\subsection{Action Space}
+\subsubsection*{Action Space}
 
 \textbf{Full action space} (5 dimensions):
 \begin{itemize}
     \item $V_0 \in [0.5, 8.0]$ m/s: cue velocity
-    \item $\phi \in [0°, 360°)$: horizontal angle
-    \item $\theta \in [0°, 90°]$: vertical angle (elevation)
+    \item $\phi \in [0^\circ, 360^\circ)$: horizontal angle
+    \item $\theta \in [0^\circ, 90^\circ]$: vertical angle (elevation)
     \item $a \in [-0.5, 0.5]$: horizontal spin offset
     \item $b \in [-0.5, 0.5]$: vertical spin offset
 \end{itemize}
@@ -700,8 +700,8 @@ Game info & 5 & counts, phase, turn \\
 \textbf{Simplified action space} (2 dimensions, used in experiments):
 \begin{itemize}
     \item $V_0 \in [1.0, 6.0]$ m/s
-    \item $\phi \in [0°, 360°)$
+    \item $\phi \in [0^\circ, 360^\circ)$
 \end{itemize}
-Fixed: $\theta = 0°$, $a = b = 0$ (no spin).
+Fixed: $\theta = 0^\circ$, $a = b = 0$ (no spin).
 
 \end{document}
