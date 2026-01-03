@@ -16,6 +16,7 @@
 \usepackage{hyperref}
 \usepackage{algorithm}
 \usepackage{algorithmic}
+\usepackage{subcaption}
 
 \title{\LARGE \bf
 Learning to Play Billiards: \\
@@ -96,6 +97,41 @@ This 20\% ``self-defeat'' rate reveals a fundamental limitation of greedy optimi
 \subsection{Motivation and Architecture}
 
 Reinforcement learning offers the promise of discovering optimal strategies through interaction, without requiring expert knowledge. I chose Soft Actor-Critic (SAC) \cite{haarnoja2018soft} for its sample efficiency and stability in continuous action spaces.
+
+\subsubsection{SAC Algorithm Overview}
+
+Algorithm~\ref{alg:sac} outlines the SAC training procedure adapted for billiards.
+
+\begin{algorithm}[h]
+\caption{SAC for Billiards with Curriculum Learning}
+\label{alg:sac}
+\begin{algorithmic}[1]
+\STATE Initialize policy $\pi_\theta$, Q-networks $Q_{\phi_1}, Q_{\phi_2}$, target networks $Q_{\bar\phi_1}, Q_{\bar\phi_2}$
+\STATE Initialize replay buffer $\mathcal{D}$, temperature $\alpha$
+\STATE Set curriculum stage $k \leftarrow 1$
+\FOR{episode $= 1$ to $N$}
+    \STATE Sample initial state $s_0$ from Stage-$k$ environment
+    \FOR{$t = 0$ to $T_{max}$}
+        \STATE $a_t \sim \pi_\theta(\cdot|s_t)$ \quad \textit{// Sample action with Gaussian exploration}
+        \STATE Execute $a_t$, observe $r_t, s_{t+1}$, done
+        \STATE Store $(s_t, a_t, r_t, s_{t+1})$ in $\mathcal{D}$
+        \IF{$|\mathcal{D}| > N_{min}$}
+            \STATE Sample minibatch from $\mathcal{D}$
+            \STATE Update critics: $\phi_i \leftarrow \phi_i - \lambda_Q \nabla_{\phi_i} J_Q$
+            \STATE Update actor: $\theta \leftarrow \theta - \lambda_\pi \nabla_\theta J_\pi$
+            \STATE Update $\alpha$: $\alpha \leftarrow \alpha - \lambda_\alpha \nabla_\alpha J_\alpha$
+            \STATE Soft update targets: $\bar\phi_i \leftarrow \tau\phi_i + (1-\tau)\bar\phi_i$
+        \ENDIF
+        \IF{done}
+            \STATE \textbf{break}
+        \ENDIF
+    \ENDFOR
+    \IF{Stage-$k$ target achieved}
+        \STATE Advance to stage $k+1$
+    \ENDIF
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
 
 \subsubsection{State Representation}
 
@@ -243,7 +279,7 @@ Modified reward to penalize draws as severely as losses (draw = $-100$).
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.48\textwidth]{figures/sac_experiments_comparison.pdf}
+\includegraphics[width=0.95\columnwidth]{figures/sac_experiments_comparison.pdf}
 \caption{SAC training comparison. Top-left: Draw rate over training. Top-right: Win rate. All experiments show initial active play followed by convergence toward conservative equilibria, with Experiment 3 (strict draw penalty) achieving lowest final draw rate.}
 \label{fig:sac_curves}
 \end{figure}
@@ -513,5 +549,159 @@ The negative results are themselves valuable: they demonstrate the boundaries of
 \bibitem{zaheer2017deep} M. Zaheer et al., ``Deep Sets,'' in \textit{Proc. NeurIPS}, 2017.
 
 \end{thebibliography}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\appendix
+
+\section{Hyperparameters}
+\label{app:hyperparams}
+
+\begin{table}[h]
+\caption{SAC Training Hyperparameters}
+\label{tab:sac_hyperparams}
+\begin{center}
+\begin{tabular}{|l|c|}
+\hline
+\textbf{Parameter} & \textbf{Value} \\
+\hline
+\multicolumn{2}{|c|}{\textit{Network Architecture}} \\
+\hline
+Actor hidden layers & [256, 256, 128] \\
+Critic hidden layers & [256, 256, 128] \\
+Activation & ReLU \\
+\hline
+\multicolumn{2}{|c|}{\textit{SAC Algorithm}} \\
+\hline
+Learning rate (actor/critic/$\alpha$) & $3 \times 10^{-4}$ \\
+Discount factor $\gamma$ & 0.99 \\
+Soft update rate $\tau$ & 0.005 \\
+Initial temperature $\alpha_0$ & 1.0 \\
+Target entropy & $-\dim(\mathcal{A})$ \\
+\hline
+\multicolumn{2}{|c|}{\textit{Replay Buffer}} \\
+\hline
+Buffer size & 100,000--200,000 \\
+Batch size & 512 \\
+Min buffer before training & 2,000--5,000 \\
+Priority exponent $\alpha$ & 0.6 \\
+\hline
+\multicolumn{2}{|c|}{\textit{Training}} \\
+\hline
+Parallel workers & 32 \\
+Games per batch & 32 \\
+Updates per batch & 4 \\
+\hline
+\end{tabular}
+\end{center}
+\end{table}
+
+\begin{table}[h]
+\caption{Reward Function Parameters}
+\label{tab:reward_params}
+\begin{center}
+\begin{tabular}{|l|c|c|}
+\hline
+\textbf{Component} & \textbf{Compact} & \textbf{Large} \\
+\hline
+Win reward & +100 & +1000 \\
+Loss reward & $-100$ & $-1000$ \\
+Draw penalty (default) & progress-based & progress-based \\
+Draw penalty (strict) & $-100$ & $-1000$ \\
+\hline
+Pocket own ball & $+\frac{n}{N} \times 100$ & $+\frac{n}{N} \times 100$ \\
+Pocket opponent ball & $-50$ & $-50$ \\
+\hline
+Keep turn bonus & +10 & +10 \\
+Lose turn penalty & $-5$ & $-5$ \\
+\hline
+Scratch foul & $-20$ & $-20$ \\
+Wrong ball first & $-15$ & $-15$ \\
+No rail contact & $-10$ & $-10$ \\
+Complete miss & $-25$ & $-25$ \\
+\hline
+\end{tabular}
+\end{center}
+\end{table}
+
+\begin{table}[h]
+\caption{Imitation Learning Hyperparameters}
+\label{tab:il_hyperparams}
+\begin{center}
+\begin{tabular}{|l|c|}
+\hline
+\textbf{Parameter} & \textbf{Value} \\
+\hline
+\multicolumn{2}{|c|}{\textit{Data Collection}} \\
+\hline
+Expert agent & long\_mcts \\
+MCTS simulations & 400 \\
+MCTS candidates & 64 \\
+Total samples & 1,787,130 \\
+Train/Val split & 80\%/20\% \\
+\hline
+\multicolumn{2}{|c|}{\textit{Large MLP}} \\
+\hline
+Hidden layers & [1024] $\times$ 6 \\
+Parameters & 26M \\
+\hline
+\multicolumn{2}{|c|}{\textit{Equivariant Network}} \\
+\hline
+Ball embedding dim & 64 \\
+Attention heads & 8 \\
+Set attention layers & 8 \\
+\hline
+\multicolumn{2}{|c|}{\textit{Training}} \\
+\hline
+Optimizer & AdamW \\
+Learning rate & $10^{-4}$ \\
+Weight decay & $10^{-4}$ \\
+Batch size & 512 \\
+Epochs & 100--200 \\
+LR scheduler & ReduceOnPlateau \\
+\hline
+\end{tabular}
+\end{center}
+\end{table}
+
+\section{State and Action Space Details}
+\label{app:spaces}
+
+\subsection{SAC State Encoding (53 dimensions)}
+
+\begin{table}[h]
+\begin{center}
+\begin{tabular}{|l|c|l|}
+\hline
+\textbf{Component} & \textbf{Dims} & \textbf{Description} \\
+\hline
+Cue ball & 3 & $(x, y, pocketed)$ \\
+Own balls & 21 & 7 balls $\times$ 3, sorted by dist \\
+Opponent balls & 21 & 7 balls $\times$ 3, sorted by dist \\
+8-ball & 3 & $(x, y, pocketed)$ \\
+Game info & 5 & counts, phase, turn \\
+\hline
+\textbf{Total} & \textbf{53} & \\
+\hline
+\end{tabular}
+\end{center}
+\end{table}
+
+\subsection{Action Space}
+
+\textbf{Full action space} (5 dimensions):
+\begin{itemize}
+    \item $V_0 \in [0.5, 8.0]$ m/s: cue velocity
+    \item $\phi \in [0°, 360°)$: horizontal angle
+    \item $\theta \in [0°, 90°]$: vertical angle (elevation)
+    \item $a \in [-0.5, 0.5]$: horizontal spin offset
+    \item $b \in [-0.5, 0.5]$: vertical spin offset
+\end{itemize}
+
+\textbf{Simplified action space} (2 dimensions, used in experiments):
+\begin{itemize}
+    \item $V_0 \in [1.0, 6.0]$ m/s
+    \item $\phi \in [0°, 360°)$
+\end{itemize}
+Fixed: $\theta = 0°$, $a = b = 0$ (no spin).
 
 \end{document}
