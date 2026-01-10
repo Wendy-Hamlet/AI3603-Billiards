@@ -51,11 +51,11 @@ This combination of challenges makes billiards an interesting test case for mode
 
 This project systematically investigates these questions through extensive experimentation with three approaches.
 
-First, I developed a \textbf{physics-based baseline agent} using geometric shot calculation and physics simulation, achieving 60\% win rate against the provided BasicAgent. This baseline establishes the difficulty of the task and provides insight into the core challenges: precise angle calculation, obstacle avoidance, and robustness to execution noise. I also analyzed the \textbf{robustness of opponent agents} through experiments with a weak random agent, discovering that even competent baseline agents lose approximately 20\% of games through ``self-defeat''---pocketing the 8-ball prematurely or scratching during critical shots.
+First, I developed a \textbf{physics-based baseline agent} using geometric shot calculation and physics simulation, achieving 60\% win rate against the provided BasicAgent. This baseline establishes the difficulty of the task and provides insight into the core challenges: precise angle calculation, obstacle avoidance, and robustness to execution noise. I also analyzed the \textbf{robustness of opponent agents} through experiments with a weak random agent, discovering that even competent baseline agents lose 18--25\% of games through ``self-defeat''---pocketing the 8-ball prematurely or scratching during critical shots.
 
 Second, I developed a complete \textbf{Soft Actor-Critic (SAC) reinforcement learning} framework with curriculum learning, parallel training, and extensive reward engineering. Initial experiments against BasicAgent achieved 0\% win rate, leading to a pivot toward self-play with simplified ball configurations. While the agent learned to play a 4-ball game with reasonable competence when strict draw penalties were applied, scaling to 6 balls immediately caused regression to a ``lazy'' equilibrium strategy. The fundamental challenge proved to be the sequential constraint that the 8-ball must be pocketed last---a temporal dependency that pure RL struggles to learn implicitly.
 
-Third, I built an extensive \textbf{imitation learning pipeline}, collecting 1.78 million state-action pairs from a strong MCTS expert and experimenting with five neural network architectures of increasing sophistication. Despite achieving low validation loss, the best model achieved only 35.5\% win rate against BasicAgent, compared to the expert's 94.4\%. The fundamental limitation is the multi-modal action problem: when multiple optimal actions exist for similar states, MSE-based training causes the network to predict averaged actions that are themselves suboptimal.
+Third, I built an extensive \textbf{imitation learning pipeline}, collecting 1.78 million state-action pairs from a strong MCTS expert and experimenting with five neural network architectures of increasing sophistication. Despite achieving low validation loss, the best model achieved only 35.5\% win rate against BasicAgent, compared to the expert's 96.9\%. The fundamental limitation is the multi-modal action problem: when multiple optimal actions exist for similar states, MSE-based training causes the network to predict averaged actions that are themselves suboptimal.
 
 Each approach built upon lessons learned from the previous, ultimately revealing why Monte Carlo Tree Search (MCTS) remains the superior approach for this domain. The negative results from learning-based methods are themselves valuable: they empirically demonstrate the boundaries of current techniques and highlight the importance of matching algorithm choice to problem structure.
 
@@ -92,18 +92,18 @@ I implemented a \texttt{RandomAgent} that makes intentionally weak shots: veloci
 \hline
 \textbf{Agent} & \textbf{Win Rate} & \textbf{Loss Rate} & \textbf{Avg Shots} \\
 \hline
-BasicAgent & 78.8\% & 21.2\% & 23.8 \\
+BasicAgent & 74.6\% & 25.1\% & 42.6 \\
 BasicAgentPro & 81.7\% & 18.2\% & 23.9 \\
 \hline
 \end{tabular}
 \end{center}
 \end{table}
 
-The results in Table~\ref{tab:robustness} were surprising: even against this nearly-passive opponent, both baseline agents lose approximately 20\% of games. Since \texttt{RandomAgent} almost never pockets balls intentionally, these losses must occur when the baseline agent defeats itself.
+The results in Table~\ref{tab:robustness} were surprising: even against this nearly-passive opponent, BasicAgent loses 25\% and BasicAgentPro loses 18\% of games. Since \texttt{RandomAgent} almost never pockets balls intentionally, these losses must occur when the baseline agent defeats itself.
 
 Analysis of individual game logs revealed three primary failure modes. First, \textbf{premature 8-ball pocketing}: the agent pockets the 8-ball before clearing all own balls, resulting in immediate loss. This occurs when the 8-ball happens to be near a pocket and the agent's shot inadvertently sends it in. Second, \textbf{scratching on the 8-ball shot}: even when the agent correctly saves the 8-ball for last, it sometimes scratches (pockets the cue ball) on the winning shot, which results in loss by rule. Third, \textbf{other foul-related losses}: various sequences of fouls can lead to loss even against a non-pocketing opponent.
 
-This 20\% ``self-defeat'' rate reveals a fundamental limitation of greedy optimization approaches: they pursue high-reward pocketing actions without adequately considering game-ending foul risks. A shot that pockets the target ball with 95\% probability but risks the 8-ball with 5\% probability has negative expected value if the 8-ball risk means immediate loss.
+This 18--25\% ``self-defeat'' rate reveals a fundamental limitation of greedy optimization approaches: they pursue high-reward pocketing actions without adequately considering game-ending foul risks. A shot that pockets the target ball with 95\% probability but risks the 8-ball with 5\% probability has negative expected value if the 8-ball risk means immediate loss.
 
 This insight directly motivated our exploration of look-ahead methods like MCTS, which can simulate action consequences and reject risky shots before execution. It also suggested that learning-based approaches might benefit from explicitly modeling foul risks, though as we shall see, this proved difficult to achieve in practice.
 
@@ -444,7 +444,7 @@ Imitation Learning & 35.5\% & - \\
 \hline
 BasicAgentPro & 85.4\% & - \\
 future (MCTS) & 57.3\% & 33.1\% \\
-\textbf{long\_mcts} & \textbf{94.4\%} & \textbf{80.6\%} \\
+\textbf{long\_mcts} & \textbf{96.9\%} & \textbf{80.6\%} \\
 \hline
 \end{tabular}
 \end{center}
@@ -453,9 +453,9 @@ future (MCTS) & 57.3\% & 33.1\% \\
 
 The results demonstrate a clear hierarchy among approaches, with MCTS-based agents significantly outperforming all learning methods.
 
-The imitation learning agent achieved only 35.5\% win rate against BasicAgent, substantially lower than the 94.4\% achieved by the MCTS expert it was trained to imitate. This dramatic performance gap directly illustrates the multi-modal action problem: the learned policy predicts ``averaged'' actions that correspond to neither of the expert's valid shot choices, resulting in frequent misses.
+The imitation learning agent achieved only 35.5\% win rate against BasicAgent, substantially lower than the 96.9\% achieved by the MCTS expert it was trained to imitate. This dramatic performance gap directly illustrates the multi-modal action problem: the learned policy predicts ``averaged'' actions that correspond to neither of the expert's valid shot choices, resulting in frequent misses.
 
-MCTS succeeds where learning methods fail for several fundamental reasons. First, MCTS provides \textbf{explicit look-ahead evaluation}: by simulating action consequences before execution, MCTS avoids the 20\% ``self-defeat'' rate observed in greedy baselines (Section II-B). The agent can reject shots that risk pocketing the 8-ball prematurely or scratching, something that RL struggled to learn implicitly.
+MCTS succeeds where learning methods fail for several fundamental reasons. First, MCTS provides \textbf{explicit look-ahead evaluation}: by simulating action consequences before execution, MCTS avoids the 18--25\% ``self-defeat'' rate observed in greedy baselines (Section II-B). The agent can reject shots that risk pocketing the 8-ball prematurely or scratching, something that RL struggled to learn implicitly.
 
 Second, MCTS requires \textbf{no training phase}: it works directly from the physics engine without collecting millions of samples or tuning hyperparameters. This is a significant practical advantage when a fast, accurate simulator is available.
 
@@ -478,7 +478,7 @@ The root cause analysis identified the sequential constraint problem as fundamen
 
 The \textbf{imitation learning} investigation collected 1.78 million state-action pairs from the MCTS expert and experimented with five increasingly sophisticated neural network architectures. The Large MLP achieved the lowest validation loss, while the Equivariant Network with discrete angle classification achieved 16\% accuracy on the critical $\phi$ angle---substantially above random chance but far below the precision required for reliable pocketing.
 
-The fundamental limitation proved to be multi-modal action distributions: when multiple balls can be targeted from similar states, MSE loss causes the network to predict averaged actions that pocket neither target. The best imitation learning agent achieved only 35.5\% win rate against BasicAgent, compared to the expert's 94.4\%.
+The fundamental limitation proved to be multi-modal action distributions: when multiple balls can be targeted from similar states, MSE loss causes the network to predict averaged actions that pocket neither target. The best imitation learning agent achieved only 35.5\% win rate against BasicAgent, compared to the expert's 96.9\%.
 
 \subsection{Key Insights}
 
@@ -486,7 +486,7 @@ The most important insight from this project is that \textbf{algorithm choice mu
 
 When a fast, accurate physics simulator is available, search-based methods like MCTS enjoy decisive advantages. They can explicitly evaluate action consequences before commitment, naturally explore multiple shot options without averaging, and require no training phase or sample collection. The simulator provides the ``gradient signal'' that RL lacks: direct feedback on whether a proposed action would succeed.
 
-The 20\% self-defeat rate observed in greedy baselines (Section II-B) further illustrates the value of look-ahead: even competent shot-making is insufficient without considering game-ending foul risks. MCTS addresses this naturally through simulation, while RL must somehow learn to avoid these rare but catastrophic events from sparse terminal rewards.
+The 18--25\% self-defeat rate observed in greedy baselines (Section II-B) further illustrates the value of look-ahead: even competent shot-making is insufficient without considering game-ending foul risks. MCTS addresses this naturally through simulation, while RL must somehow learn to avoid these rare but catastrophic events from sparse terminal rewards.
 
 \subsection{Limitations and Future Work}
 
@@ -507,7 +507,7 @@ I was responsible for the learning-based approaches and infrastructure developme
 
 \textbf{Physics-based agent baseline}: I implemented a geometric shot calculation agent that computes ghost ball positions, evaluates cut angles, and uses physics simulation to verify shot feasibility. This agent achieved 60\% win rate against BasicAgent and provided the foundation for understanding the problem requirements.
 
-\textbf{Opponent robustness analysis}: I designed and executed experiments using a RandomAgent to probe the robustness of baseline opponents. This analysis revealed that BasicAgent and BasicAgentPro lose approximately 20\% of games through self-defeat (premature 8-ball pocketing, scratches), even against a nearly-passive opponent. This insight motivated the exploration of look-ahead methods.
+\textbf{Opponent robustness analysis}: I designed and executed experiments using a RandomAgent to probe the robustness of baseline opponents. This analysis revealed that BasicAgent loses 25\% and BasicAgentPro loses 18\% of games through self-defeat (premature 8-ball pocketing, scratches), even against a nearly-passive opponent. This insight motivated the exploration of look-ahead methods.
 
 \textbf{Complete SAC reinforcement learning framework}: I developed a full Soft Actor-Critic implementation adapted for billiards, including the 53-dimensional state encoding, multi-component reward function, and curriculum learning infrastructure. The framework supports parallel training across multiple CPU workers, with careful handling of physics engine compatibility requirements.
 
@@ -527,7 +527,7 @@ My teammate focused on the search-based approach, contributing:
 
 \textbf{Agent optimization}: Iterative improvements to MCTS parameters and evaluation heuristics, culminating in the long\_mcts configuration with 400 simulations and 64 candidates.
 
-\textbf{Final solution}: The long\_mcts agent achieved 94.4\% win rate against BasicAgent and 80.6\% against BasicAgentPro, representing our team's final submission.
+\textbf{Final solution}: The final MCTS agent (long\_opening variant incorporating a safe opening strategy) achieved 96.2\% win rate against BasicAgent and 79.5\% against BasicAgentPro, representing our team's final submission.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \begin{thebibliography}{99}
