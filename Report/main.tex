@@ -322,7 +322,7 @@ The hypothesis was that by observing expert behavior, a neural network could lea
 
 I implemented a parallel data collection system using Python's ProcessPoolExecutor to efficiently gather expert demonstrations. The expert agent was the long\_mcts implementation with 400 MCTS simulations and 64 candidate actions per decision, representing the strongest available policy. To generate diverse game states, the expert played against BasicAgent, which provided a reasonable opponent that creates varied board configurations.
 
-The parallel infrastructure deployed 100 worker processes across a multi-core server, achieving a collection rate of approximately 100 games per hour. Each game generates multiple state-action pairs (one per expert decision), and over several weeks of continuous collection, the pipeline accumulated a dataset of \textbf{1,787,130 state-action pairs}. This represents one of the largest billiards imitation learning datasets reported in the literature.
+The parallel infrastructure deployed 100 worker processes across a multi-core server, achieving a collection rate of approximately 1,800 games per hour (based on measurements from long\_mcts games, accounting for data collection overhead). Each game generates multiple state-action pairs (one per expert decision), and over several weeks of continuous collection, the pipeline accumulated a dataset of \textbf{1,787,130 state-action pairs}. This represents one of the largest billiards imitation learning datasets reported in the literature.
 
 \subsubsection{State Representation}
 
