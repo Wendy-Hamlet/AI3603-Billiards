@@ -53,7 +53,7 @@ This project systematically investigates these questions through extensive exper
 
 First, I developed a \textbf{physics-based baseline agent} using geometric shot calculation and physics simulation, achieving 60\% win rate against the provided BasicAgent. This baseline establishes the difficulty of the task and provides insight into the core challenges: precise angle calculation, obstacle avoidance, and robustness to execution noise. I also analyzed the \textbf{robustness of opponent agents} through experiments with a weak random agent, discovering that even competent baseline agents lose 18--25\% of games through ``self-defeat''---pocketing the 8-ball prematurely or scratching during critical shots.
 
-Second, I developed a complete \textbf{Soft Actor-Critic (SAC) reinforcement learning} framework with curriculum learning, parallel training, and extensive reward engineering. Initial experiments against BasicAgent achieved 0\% win rate, leading to a pivot toward self-play with simplified ball configurations. While the agent learned to play a 4-ball game with reasonable competence when strict draw penalties were applied, scaling to 6 balls immediately caused regression to a ``lazy'' equilibrium strategy. The fundamental challenge proved to be the sequential constraint that the 8-ball must be pocketed last---a temporal dependency that pure RL struggles to learn implicitly.
+Second, I developed a complete \textbf{Soft Actor-Critic (SAC) reinforcement learning} framework with curriculum learning, parallel training, and extensive reward engineering. Initial experiments against BasicAgent achieved 0\% win rate, leading to a pivot toward self-play with simplified ball configurations. While the agent learned to play a 4-ball game with reasonable competence when strict draw penalties were applied, scaling to 6 balls immediately caused regression to a reward-induced degenerate equilibrium. The fundamental challenge proved to be the sequential constraint that the 8-ball must be pocketed last---a temporal dependency that pure RL struggles to learn implicitly.
 
 Third, I built an extensive \textbf{imitation learning pipeline}, collecting 1.78 million state-action pairs from a strong MCTS expert and experimenting with five neural network architectures of increasing sophistication. Despite achieving low validation loss, the best model achieved only 35.5\% win rate against BasicAgent, compared to the expert's 96.9\%. The fundamental limitation is the multi-modal action problem: when multiple optimal actions exist for similar states, MSE-based training causes the network to predict averaged actions that are themselves suboptimal.
 
@@ -196,18 +196,18 @@ Given that BasicAgent was too strong, I redesigned the training approach around 
 
 \subsubsection{Ball Count Curriculum Design}
 
-Instead of varying opponent difficulty, I varied game complexity by controlling the number of balls. The \textbf{4-Ball Stage} represents the simplest possible game: one cue ball, one own ball, one opponent ball, and the 8-ball. This configuration provides the maximum probability of successful pocketing through random exploration, while still requiring the agent to learn the fundamental rule that the 8-ball must be pocketed last. The \textbf{6-Ball Stage} introduces two own balls and two opponent balls, plus cue and 8-ball, adding more complex decision-making about shot selection. The eventual goal was to train on the complete 15-ball game.
+Instead of varying opponent difficulty, I varied game complexity by controlling the number of balls. The \textbf{4-Ball Stage} represents the simplest possible game: one cue ball, one own ball, one opponent ball, and the 8-ball. This configuration provides the maximum probability of successful pocketing through random exploration, while still requiring the agent to learn the fundamental rule that the 8-ball must be pocketed last. The \textbf{6-Ball Stage} introduces two own balls and two opponent balls, plus cue and 8-ball, adding more complex decision-making about shot selection. The eventual goal was to train on the complete 16-ball game.
 
 For consistency in state representation, balls not present in simplified scenarios are marked as ``already pocketed'' in the state encoding, maintaining the 53-dimensional input throughout all stages.
 
-\subsubsection{Discovery of the ``Lazy'' Strategy}
+\subsubsection{Discovery of the Degenerate Strategy}
 
-Training on the 4-ball scenario with self-play revealed an unexpected and frustrating phenomenon. Rather than learning to pocket balls aggressively, the agent converged to what I call the ``lazy'' or ``stalling'' strategy.
+Training on the 4-ball scenario with self-play revealed an unexpected and frustrating phenomenon. Rather than learning to pocket balls aggressively, the agent converged to a degenerate strategy.
 
 The game has a 60-shot limit, after which the winner is determined by who has pocketed more balls. The agent discovered that attempting to pocket balls carries risk: a missed shot might leave an easy opportunity for the opponent, and prematurely pocketing the 8-ball results in immediate loss. The ``optimal'' strategy in symmetric self-play became: avoid pocketing any balls, run out the clock, and hope for a favorable tie-breaker.
 
 \begin{table}[h]
-\caption{Self-Play with Large Rewards ($\pm$1000): Convergence to Lazy Strategy}
+\caption{Self-Play with Large Rewards ($\pm$1000): Convergence to Degenerate Strategy}
 \label{tab:exp1}
 \begin{center}
 \begin{tabular}{|r|c|c|c|c|}
@@ -224,14 +224,14 @@ The game has a 60-shot limit, after which the winner is determined by who has po
 
 Table~\ref{tab:exp1} shows this phenomenon quantitatively. Early in training (800 games), draws occurred in only 9\% of games, with active pocketing. But as training progressed, the draw rate climbed to 51\% by 200,000 games, with average pockets per game dropping from 0.53 to 0.32.
 
-\subsubsection{Reward Modifications to Counter Lazy Strategy}
+\subsubsection{Reward Modifications to Counter Degenerate Strategy}
 
-I experimented with several reward modifications to discourage the lazy strategy.
+I experimented with several reward modifications to discourage the degenerate strategy.
 
 \textbf{Compact Rewards ($\pm$100)} tested whether smaller reward magnitudes would reduce the perceived risk of aggressive play. As shown in Table~\ref{tab:exp2}, the results were nearly identical---47\% draw rate after 20,000 games.
 
 \begin{table}[h]
-\caption{Compact Rewards ($\pm$100): Same Lazy Convergence}
+\caption{Compact Rewards ($\pm$100): Same Degenerate Convergence}
 \label{tab:exp2}
 \begin{center}
 \begin{tabular}{|r|c|c|c|c|}
@@ -249,7 +249,7 @@ I experimented with several reward modifications to discourage the lazy strategy
 \textbf{Strict Draw Penalty} modified the reward function to penalize draws as severely as losses (draw penalty = $-100$, same as loss). This was the most successful intervention, reducing the draw rate to 36\% and increasing the active play rate to 64\%.
 
 \begin{table}[h]
-\caption{Strict Draw Penalty: Reduced Lazy Behavior}
+\caption{Strict Draw Penalty: Reduced Degenerate Behavior}
 \label{tab:exp3}
 \begin{center}
 \begin{tabular}{|r|c|c|c|c|}
@@ -275,7 +275,7 @@ With the strict draw penalty, the agent finally learned to play the 4-ball game 
    
 \subsubsection{Failure to Scale: The 6-Ball Collapse}
 
-Encouraged by success in the 4-ball scenario, I attempted to train on the 6-ball configuration. The results were disheartening: the agent immediately reverted to the lazy strategy, despite the strict draw penalty that had worked for 4 balls.
+Encouraged by success in the 4-ball scenario, I attempted to train on the 6-ball configuration. The results were disheartening: the agent immediately reverted to the degenerate strategy, despite the strict draw penalty that had worked for 4 balls.
 
 I experimented with numerous reward function modifications: increasing pocketing rewards, adding intermediate progress bonuses, penalizing low-velocity shots, and rewarding ball proximity to pockets. None of these interventions prevented convergence to conservative play.
 
@@ -491,7 +491,7 @@ This project systematically explored learning-based approaches for billiards AI,
 
 The \textbf{reinforcement learning} investigation developed a complete Soft Actor-Critic framework with careful reward engineering and curriculum learning. The initial approach of training against BasicAgent revealed that even this ``basic'' opponent is too strong for RL exploration---the agent achieved 0\% win rate when environment noise was removed, with all wins attributable to opponent errors rather than learned skill.
 
-Pivoting to self-play with a ball count curriculum showed promise in the simplified 4-ball scenario. However, the agent discovered a ``lazy'' equilibrium strategy: avoiding all pocketing attempts to run out the 60-shot clock. Strict draw penalties successfully countered this behavior for 4 balls, reducing draw rates from 51\% to 36\%. But scaling to 6 balls immediately caused regression to lazy play, despite extensive reward function modifications.
+Pivoting to self-play with a ball count curriculum showed promise in the simplified 4-ball scenario. However, the agent discovered a reward-induced degenerate equilibrium: avoiding all pocketing attempts to run out the 60-shot clock. Strict draw penalties successfully countered this behavior for 4 balls, reducing draw rates from 51\% to 36\%. But scaling to 6 balls immediately caused regression to degenerate play, despite extensive reward function modifications.
 
 The root cause analysis identified the sequential constraint problem as fundamental: the 8-ball-last rule requires temporal reasoning that pure RL struggles to learn implicitly. Combined with sparse rewards, high precision requirements, and exploration inefficiency, these challenges make end-to-end RL impractical for billiards without prohibitive computational resources.
 
@@ -530,7 +530,7 @@ I was responsible for the learning-based approaches and infrastructure developme
 
 \textbf{Complete SAC reinforcement learning framework}: I developed a full Soft Actor-Critic implementation adapted for billiards, including the 53-dimensional state encoding, multi-component reward function, and curriculum learning infrastructure. The framework supports parallel training across multiple CPU workers, with careful handling of physics engine compatibility requirements.
 
-\textbf{Controlled RL experiments}: I designed and executed three systematic experiments comparing reward configurations (large vs compact terminal rewards, progressive vs strict draw penalties). These experiments demonstrated that reward structure matters more than magnitude and identified the ``lazy equilibrium'' phenomenon in self-play training.
+\textbf{Controlled RL experiments}: I designed and executed three systematic experiments comparing reward configurations (large vs compact terminal rewards, progressive vs strict draw penalties). These experiments demonstrated that reward structure matters more than magnitude and identified the degenerate equilibrium phenomenon in self-play training.
 
 \textbf{Imitation learning pipeline}: I built the complete data collection infrastructure using parallel ProcessPoolExecutor workers, accumulating 1.78 million expert state-action pairs. I designed the 80-dimensional state representation and 6-dimensional action encoding, and implemented five neural network architectures of increasing sophistication: MLP variants, Transformer-based attention, discrete angle classification, geometric data augmentation, and equivariant Set Attention networks.
 
