@@ -344,7 +344,7 @@ I experimented with five architectures of increasing sophistication, each attemp
 
 \subsubsection{Architecture 1: MLP Networks}
 
-The initial approach used simple feedforward networks, varying capacity to understand the impact of model size. The \textbf{small} configuration used 4 hidden layers with 512 units each, totaling approximately 8 million parameters. The \textbf{large} configuration scaled to 6 hidden layers with 1024 units each, reaching 26 million parameters. Both used ReLU activations, batch normalization, and dropout for regularization.
+The initial approach used feedforward networks with Transformer-based architectures, varying capacity to understand the impact of model size. The \textbf{small} configuration used 4 hidden layers with 256 units each, totaling approximately 8 million parameters. The \textbf{large} configuration used 8 Transformer blocks with 512 hidden dimensions and 8 attention heads, reaching 26 million parameters. Both used GELU activations, layer normalization, and dropout for regularization.
 
 The loss function required careful weighting across action components, as the horizontal angle $\phi$ is most critical for pocketing accuracy:
 \begin{equation}
@@ -365,7 +365,7 @@ The attended ball representations are aggregated through global average pooling,
 
 Analysis of early training runs revealed that the horizontal angle $\phi$ was the most challenging component to predict accurately. Even small angular errors (5--10 degrees) often mean the difference between pocketing a ball and missing entirely. Motivated by this observation, I converted $\phi$ prediction from regression to classification.
 
-The 360-degree range is discretized into 72 bins of 5 degrees each. The network outputs a 72-dimensional softmax distribution, and training uses cross-entropy loss for $\phi$ while maintaining MSE loss for other action components. At inference time, the predicted angle is the center of the highest-probability bin. This approach avoids the ``averaging'' problem to some extent: the network can learn a multi-modal distribution over bins rather than being forced to output a single point estimate.
+The 360-degree range is discretized into 36 bins of 10 degrees each. The network outputs a 36-dimensional softmax distribution, and training uses cross-entropy loss for $\phi$ while maintaining MSE loss for other action components. At inference time, the predicted angle is the center of the highest-probability bin. This approach avoids the ``averaging'' problem to some extent: the network can learn a multi-modal distribution over bins rather than being forced to output a single point estimate.
 
 I added LayerNorm before the final classification layer and clamped logits to $[-10, 10]$ to prevent numerical instability during early training when the network's predictions are essentially random.
 
@@ -400,7 +400,7 @@ Table~\ref{tab:il_results} summarizes the training outcomes across all architect
 Large MLP & 26M & 0.547 & 40 & - \\
 Small MLP & 8M & 0.663 & 47 & - \\
 Aug Small & 8M & 0.636 & 106 & - \\
-Discrete 72 & 26M & 5.55 & 1 & - \\
+Discrete 36 & 26M & 3.76 & 60 & 50.2\% \\
 Equivariant & 26M & 2.97 & 25 & 16\% \\
 \hline
 \end{tabular}
@@ -409,7 +409,7 @@ Equivariant & 26M & 2.97 & 25 & 16\% \\
 
 The Large MLP achieved the lowest validation loss (0.547) among continuous models, reaching its best performance at epoch 40. The smaller 8M parameter model showed higher loss (0.663), suggesting that model capacity matters for this task. Data augmentation provided modest improvement (0.636 vs 0.663 for the small model) but required significantly more training epochs (106 vs 47) to converge.
 
-The discrete classification approach showed concerning behavior: the best validation loss occurred at epoch 1, with subsequent training only increasing the loss. This suggests that the classification formulation may not be well-suited to this problem, possibly because the discretization loses important information about action similarity.
+The discrete classification approach with 36 bins achieved 50.2\% accuracy on the $\phi$ prediction task (where random guessing would yield $\sim$2.8\% for 36 bins). This represents substantial improvement over random chance, translating to an expected angular error of approximately 18 degrees. However, this precision is still insufficient for reliable pocketing, which typically requires sub-degree accuracy. The model reached its best validation loss (3.76) at epoch 60, demonstrating stable training convergence.
 
 The equivariant network achieved 16\% accuracy on the discrete $\phi$ prediction (where random guessing would yield $\sim$1.4\% for 72 bins). While this is substantially above chance, it translates to an expected angular error of approximately 15 bins or 75 degrees---far too large for reliable pocketing. The best model was evaluated against BasicAgent, achieving a \textbf{35.5\% win rate}, substantially below the expert's performance.
 
@@ -426,7 +426,7 @@ When training with MSE loss, the network is incentivized to minimize squared err
 
 This averaged angle of $132.5^\circ$ pockets \textit{neither} ball. The network achieves low training loss by predicting the geometric center of a multi-modal distribution, but this center is not a valid action. This is a fundamental limitation of behavior cloning with MSE loss when expert behavior exhibits inherent variability.
 
-I attempted several approaches to mitigate this problem. Converting $\phi$ to discrete classification with 72 bins allows the network to output a distribution over angles rather than a point estimate. In principle, this could represent multi-modal predictions. However, the 16\% accuracy suggests that the network still struggles to identify the correct mode. Mixture Density Networks (MDNs) could explicitly model multiple modes by predicting parameters of a Gaussian mixture, but this adds significant complexity and requires careful tuning of the number of mixture components. The most principled solution would be target conditioning: if the network also received information about which ball to target, the action distribution would become unimodal. However, this would require the expert to output target information, which MCTS does not naturally provide.
+I attempted several approaches to mitigate this problem. Converting $\phi$ to discrete classification with 36 bins allows the network to output a distribution over angles rather than a point estimate. In principle, this could represent multi-modal predictions. The Discrete 36 model achieved 50.2\% accuracy, demonstrating that classification can improve over regression. However, this precision is still insufficient for reliable pocketing. Mixture Density Networks (MDNs) could explicitly model multiple modes by predicting parameters of a Gaussian mixture, but this adds significant complexity and requires careful tuning of the number of mixture components. The most principled solution would be target conditioning: if the network also received information about which ball to target, the action distribution would become unimodal. However, this would require the expert to output target information, which MCTS does not naturally provide.
 
 \subsection{Overfitting and Distribution Shift}
 
@@ -442,7 +442,7 @@ The imitation learning experiments, while unsuccessful in producing a strong age
 
 First, \textbf{multi-modal action distributions fundamentally defeat MSE-based behavior cloning}. When experts exhibit varied behavior for similar states, the learned policy predicts invalid averaged actions. This is not merely a training issue but a fundamental mismatch between the loss function and the problem structure.
 
-Second, \textbf{angular precision requirements are extreme for billiards}. With 72 bins spanning 360 degrees, each bin covers 5 degrees. The observed 16\% classification accuracy implies expected errors of approximately 75 degrees, while successful pocketing typically requires sub-degree precision. Achieving sufficient angular accuracy through supervised learning would require either much finer discretization (with correspondingly more data) or a fundamentally different approach.
+Second, \textbf{angular precision requirements are extreme for billiards}. With 36 bins spanning 360 degrees, each bin covers 10 degrees. The Discrete 36 model achieved 50.2\% accuracy, translating to an expected angular error of approximately 18 degrees. While this is substantially better than regression-based approaches, successful pocketing typically requires sub-degree precision. The Equivariant network with 72 bins (5 degrees per bin) achieved only 16\% accuracy, demonstrating that finer discretization alone does not solve the problem. Achieving sufficient angular accuracy through supervised learning would require either much finer discretization with significantly more data or a fundamentally different approach.
 
 Third, \textbf{distribution shift causes compounding errors during deployment}. Even with 1.78 million training samples, the learned policy visits states outside the training distribution during gameplay, leading to increasingly poor predictions over the course of a game.
 
