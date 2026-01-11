@@ -172,7 +172,7 @@ The \textbf{turn dynamics} component provides $+10$ for retaining turn (successf
 
 The \textbf{foul penalties} are graded by severity: scratch (pocketing cue ball) receives $-20$, wrong ball first contact receives $-15$, no rail contact after cue ball hits object ball receives $-10$, and complete miss (no contact) receives $-25$.
 
-The \textbf{defense reward} is computed retroactively: when the opponent fails on their turn (misses or fouls), the agent receives $+5$ added to its previous action's reward, encouraging defensive positioning.
+The \textbf{defense reward} was designed to provide $+5$ retroactively when the opponent fails on their turn (misses or fouls), encouraging defensive positioning. However, this component was not used in the actual training experiments. The rationale was that defense rewards are only meaningful against strong opponents who can capitalize on positioning mistakes; against weaker opponents in self-play or simplified scenarios, defensive positioning provides minimal advantage. Since the RL agent never progressed to training against strong opponents, this reward component remained disabled in all experiments.
 
 The \textbf{terminal rewards} for game outcomes were a critical design variable. I experimented with both large ($\pm 1000$) and compact ($\pm 100$) scales, as well as different draw penalties, which proved to be the most consequential design choice.
 
