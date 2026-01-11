@@ -147,7 +147,11 @@ Reward design proved to be one of the most challenging aspects of this project. 
 r = r_{pocket} + r_{turn} + r_{foul} + r_{defense} + r_{terminal}
 \end{equation}
 
-The \textbf{pocketing reward} uses proportional value to encourage clearing balls efficiently. When the agent pockets its own ball, the reward scales with progress: $r_{pocket} = \frac{n_{pocketed}}{n_{remaining}} \times 100$. This design gives higher rewards for pocketing balls when fewer remain, reflecting their increased strategic importance. Pocketing opponent balls incurs a penalty of $-50$.
+The \textbf{pocketing reward} uses a proportional value system to evaluate ball-pocketing outcomes at different game stages. A critical design requirement is that a single shot may pocket both own balls and opponent balls simultaneously, and the reward function must properly evaluate such mixed outcomes.
+
+The reward for pocketing own balls uses proportional scaling: $r_{own} = \frac{n_{pocketed}}{n_{remaining}} \times C_1$, where $C_1 = 100$ is a scaling constant. Similarly, the penalty for pocketing opponent balls uses proportional scaling: $r_{opponent} = -\frac{n_{opponent\_pocketed}}{n_{opponent\_remaining}} \times C_2$, where $C_2 = 100$. The total pocketing reward is the sum: $r_{pocket} = r_{own} + r_{opponent}$.
+
+This proportional design serves two purposes. First, it reflects stage-dependent strategic value: pocketing a ball when only 2 remain (50\% progress) provides twice the reward as pocketing when 4 remain (25\% progress), reflecting the increased importance of each ball as the game progresses. Second, it enables fair evaluation of mixed outcomes: if a shot pockets 1 own ball (from 4 remaining) and 1 opponent ball (from 3 remaining), the net reward is $\frac{1}{4} \times 100 - \frac{1}{3} \times 100 = 25 - 33.3 = -8.3$, correctly signaling that helping the opponent clear their balls outweighs the benefit of pocketing one's own ball in this scenario.
 
 The \textbf{turn dynamics} component provides $+10$ for retaining turn (successful pocket or opponent foul) and $-5$ for losing turn, encouraging aggressive play that maintains initiative.
 
