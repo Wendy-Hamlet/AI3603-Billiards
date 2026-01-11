@@ -1,249 +1,723 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%2345678901234567890123456789012345678901234567890123456789012345678901234567890
-%        1         2         3         4         5         6         7         8
+% AI3603 Billiards Project Report
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-\documentclass[letterpaper, 10 pt, conference]{ieeeconf}  % Comment this line out
-                                                          % if you need a4paper
-%\documentclass[a4paper, 10pt, conference]{ieeeconf}      % Use this line for a4
-                                                          % paper
+\documentclass[letterpaper, 10 pt, conference]{ieeeconf}
 
-\IEEEoverridecommandlockouts                              % This command is only
-                                                          % needed if you want to
-                                                          % use the \thanks command
+\IEEEoverridecommandlockouts
 \overrideIEEEmargins
-% See the \addtolength command later in the file to balance the column lengths
-% on the last page of the document
 
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
-
-% The following packages can be found on http:\\www.ctan.org
-%\usepackage{graphics} % for pdf, bitmapped graphics files
-%\usepackage{epsfig} % for postscript graphics files
-%\usepackage{mathptmx} % assumes new font selection scheme installed
-%\usepackage{mathptmx} % assumes new font selection scheme installed
-%\usepackage{amsmath} % assumes amsmath package installed
-%\usepackage{amssymb}  % assumes amsmath package installed
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{subcaption}
 
 \title{\LARGE \bf
-Preparation of Papers for IEEE Sponsored Conferences \& Symposia*
+Learning to Play Billiards: \\
+A Journey Through Reinforcement and Imitation Learning
 }
 
-%\author{ \parbox{3 in}{\centering Huibert Kwakernaak*
-%         \thanks{*Use the $\backslash$thanks command to put information here}\\
-%         Faculty of Electrical Engineering, Mathematics and Computer Science\\
-%         University of Twente\\
-%         7500 AE Enschede, The Netherlands\\
-%         {\tt\small h.kwakernaak@autsubmit.com}}
-%         \hspace*{ 0.5 in}
-%         \parbox{3 in}{ \centering Pradeep Misra**
-%         \thanks{**The footnote marks may be inserted manually}\\
-%        Department of Electrical Engineering \\
-%         Wright State University\\
-%         Dayton, OH 45435, USA\\
-%         {\tt\small pmisra@cs.wright.edu}}
-%}
-
-\author{Huibert Kwakernaak$^{1}$ and Pradeep Misra$^{2}$% <-this % stops a space
-\thanks{*This work was not supported by any organization}% <-this % stops a space
-\thanks{$^{1}$H. Kwakernaak is with Faculty of Electrical Engineering, Mathematics and Computer Science,
-        University of Twente, 7500 AE Enschede, The Netherlands
-        {\tt\small h.kwakernaak at papercept.net}}%
-\thanks{$^{2}$P. Misra is with the Department of Electrical Engineering, Wright State University,
-        Dayton, OH 45435, USA
-        {\tt\small p.misra at ieee.org}}%
+\author{Abigail Jin\\
+\textit{Department of Computer Science and Engineering}\\
+\textit{Shanghai Jiao Tong University}\\
+Shanghai, China
 }
-
 
 \begin{document}
-
-
 
 \maketitle
 \thispagestyle{empty}
 \pagestyle{empty}
 
-
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \begin{abstract}
 
-This electronic document is a ``live'' template. The various components of your paper [title, text, heads, etc.] are already defined on the style sheet, as illustrated by the portions given in this document.
+This report documents my systematic exploration of learning-based approaches for the billiards AI challenge. Starting from a physics-based baseline (60\% win rate), I developed a complete Soft Actor-Critic (SAC) reinforcement learning framework with curriculum learning, followed by an extensive imitation learning pipeline that collected 1.78 million expert demonstrations and experimented with five neural network architectures. While these learning approaches did not surpass the MCTS expert, the journey revealed fundamental insights about why search-based methods excel in high-precision physics tasks: the multi-modal action distribution problem in imitation learning, and the sparse reward challenge in reinforcement learning. The final MCTS solution by my teammate achieved 80.6\% against BasicAgentPro.
 
 \end{abstract}
-
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{INTRODUCTION}
 
-This template, modified in MS Word 2003 and saved as ``Word 97-2003 \& 6.0/95 -- RTF'' for the PC, provides authors with most of the formatting specifications needed for preparing electronic versions of their papers. All standard paper components have been specified for three reasons: (1) ease of use when formatting individual papers, (2) automatic compliance to electronic requirements that facilitate the concurrent or later production of electronic products, and (3) conformity of style throughout a conference proceedings. Margins, column widths, line spacing, and type styles are built-in; examples of the type styles are provided throughout this document and are identified in italic type, within parentheses, following the example. Some components, such as multi-leveled equations, graphics, and tables are not prescribed, although the various table text styles are provided. The formatter will need to create these components, incorporating the applicable criteria that follow.
+Billiards presents a fascinating and challenging domain for artificial intelligence research. The game requires precise control over a continuous action space with five parameters---cue velocity, horizontal and vertical shooting angles, and two spin components---while navigating complex physics dynamics involving ball collisions, cushion rebounds, and friction effects. Beyond mechanical precision, successful play demands tactical awareness (selecting optimal shots from multiple candidates) and strategic planning (positioning for future shots, avoiding game-ending fouls).
 
-\section{PROCEDURE FOR PAPER SUBMISSION}
+This combination of challenges makes billiards an interesting test case for modern machine learning methods. Can deep reinforcement learning discover effective strategies through self-play? Can neural networks learn to imitate expert behavior from demonstration data? Or do the unique characteristics of billiards---its high precision requirements, sparse reward structure, and complex sequential constraints---favor alternative approaches?
 
-\subsection{Selecting a Template (Heading 2)}
+This project systematically investigates these questions through extensive experimentation with three approaches.
 
-First, confirm that you have the correct template for your paper size. This template has been tailored for output on the US-letter paper size. Please do not use it for A4 paper since the margin requirements for A4 papers may be different from Letter paper size.
+First, I developed a \textbf{physics-based baseline agent} using geometric shot calculation and physics simulation, achieving 60\% win rate against the provided BasicAgent. This baseline establishes the difficulty of the task and provides insight into the core challenges: precise angle calculation, obstacle avoidance, and robustness to execution noise. I also analyzed the \textbf{robustness of opponent agents} through experiments with a weak random agent, discovering that even competent baseline agents lose 18--25\% of games through ``self-defeat''---pocketing the 8-ball prematurely or scratching during critical shots.
 
-\subsection{Maintaining the Integrity of the Specifications}
+Second, I developed a complete \textbf{Soft Actor-Critic (SAC) reinforcement learning} framework with curriculum learning, parallel training, and extensive reward engineering. Initial experiments against BasicAgent achieved 0\% win rate, leading to a pivot toward self-play with simplified ball configurations. While the agent learned to play a 4-ball game with reasonable competence when strict draw penalties were applied, scaling to 6 balls immediately caused regression to a reward-induced degenerate equilibrium. The fundamental challenge proved to be the sequential constraint that the 8-ball must be pocketed last---a temporal dependency that pure RL struggles to learn implicitly.
 
-The template is used to format your paper and style the text. All margins, column widths, line spaces, and text fonts are prescribed; please do not alter them. You may note peculiarities. For example, the head margin in this template measures proportionately more than is customary. This measurement and others are deliberate, using specifications that anticipate your paper as one part of the entire proceedings, and not as an independent document. Please do not revise any of the current designations
+Third, I built an extensive \textbf{imitation learning pipeline} to address a practical constraint: the competition requires real-time decision-making with a 3-minute time limit per game (1.5 minutes per player). While my teammate's MCTS agent achieved excellent performance (96.9\% win rate), it exceeded the time budget. I collected 1.78 million state-action pairs from this MCTS expert and experimented with five neural network architectures of increasing sophistication, aiming to approximate the expert's decision quality while achieving real-time inference speed. Despite achieving low validation loss, the best model achieved only 35.5\% win rate against BasicAgent, compared to the expert's 96.9\%. The fundamental limitation is the multi-modal action problem: when multiple optimal actions exist for similar states, MSE-based training causes the network to predict averaged actions that are themselves suboptimal.
 
-\section{MATH}
+Each approach built upon lessons learned from the previous, ultimately revealing why Monte Carlo Tree Search (MCTS) remains the superior approach for this domain. The negative results from learning-based methods are themselves valuable: they empirically demonstrate the boundaries of current techniques and highlight the importance of matching algorithm choice to problem structure.
 
-Before you begin to format your paper, first write and save the content as a separate text file. Keep your text and graphic files separate until after the text has been formatted and styled. Do not use hard tabs, and limit use of hard returns to only one return at the end of a paragraph. Do not add any kind of pagination anywhere in the paper. Do not number text heads-the template will do that for you.
+The remainder of this report is organized as follows. Section II describes the baseline agents and opponent analysis. Section III details the reinforcement learning experiments and failure analysis. Section IV covers the imitation learning pipeline and its limitations. Section V provides comparative analysis across all approaches. Section VI concludes with key insights and directions for future work.
 
-Finally, complete content and organizational editing before formatting. Please take note of the following items when proofreading spelling and grammar:
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{BASELINE AGENTS AND OPPONENT ANALYSIS}
 
-\subsection{Abbreviations and Acronyms} Define abbreviations and acronyms the first time they are used in the text, even after they have been defined in the abstract. Abbreviations such as IEEE, SI, MKS, CGS, sc, dc, and rms do not have to be defined. Do not use abbreviations in the title or heads unless they are unavoidable.
+Before developing learning-based approaches, I established baseline performance and analyzed the opponents we compete against. This preliminary work provided crucial insights that shaped the subsequent experiments.
 
-\subsection{Units}
+\subsection{Physics-Based Baseline Agent}
 
-\begin{itemize}
+I implemented a physics-based agent to understand the fundamental requirements for billiards play. The agent follows a classical approach: for each target ball, it computes the ``ghost ball'' position---the location where the cue ball must be placed to pocket the target along a straight line to the pocket. The shooting angle is then calculated as the direction from the current cue ball position to this ghost ball position.
 
-\item Use either SI (MKS) or CGS as primary units. (SI units are encouraged.) English units may be used as secondary units (in parentheses). An exception would be the use of English units as identifiers in trade, such as ``3.5-inch disk drive''.
-\item Avoid combining SI and CGS units, such as current in amperes and magnetic field in oersteds. This often leads to confusion because equations do not balance dimensionally. If you must use mixed units, clearly state the units for each quantity that you use in an equation.
-\item Do not mix complete spellings and abbreviations of units: ``Wb/m2'' or ``webers per square meter'', not ``webers/m2''.  Spell out units when they appear in text: ``\ldots a few henries'', not ``\ldots a few H''.
-\item Use a zero before decimal points: ``0.25'', not ``.25''. Use ``cm$^3$'', not ``cc''. (bullet list)
+The agent evaluates all possible target-pocket combinations (up to 42 in the worst case: 7 target balls times 6 pockets), computing cut angles and checking for obstructions along both the cue-to-target and target-to-pocket paths. Shots with extreme cut angles (greater than 60 degrees) or blocked paths are rejected. The remaining candidates are ranked by cut angle magnitude, with straighter shots preferred.
 
-\end{itemize}
+For each candidate shot, the agent uses the \texttt{pooltool} physics engine to simulate the outcome, verifying that the target ball actually enters the pocket and that no fouls occur (scratching, wrong ball first contact, etc.). This simulation-based verification is crucial because geometric calculations alone cannot account for complex collision dynamics, especially when multiple balls are in proximity.
 
+The agent achieved 60\% win rate against BasicAgent, establishing a baseline understanding of the problem's requirements. The 40\% loss rate highlighted several challenges: the greedy one-shot-ahead approach often leaves the cue ball in poor position for subsequent shots, difficult cuts are frequently missed due to execution noise, and defensive considerations are entirely absent.
 
-\subsection{Equations}
+This work provided the foundation for my teammate's MCTS agent, which extends the basic shot evaluation with look-ahead search to consider multi-shot sequences and position play.
 
-The equations are an exception to the prescribed specifications of this template. You will need to determine whether or not your equation should be typed using either the Times New Roman or the Symbol font (please no other font). To create multileveled equations, it may be necessary to treat the equation as a graphic and insert it into the text after your paper is styled. Number equations consecutively. Equation numbers, within parentheses, are to position flush right, as in (1), using a right tab stop. To make your equations more compact, you may use the solidus ( / ), the exp function, or appropriate exponents. Italicize Roman symbols for quantities and variables, but not Greek symbols. Use a long dash rather than a hyphen for a minus sign. Punctuate equations with commas or periods when they are part of a sentence, as in
-\begin{equation}
-\alpha + \beta = \chi
-\end{equation}
+\subsection{Opponent Robustness Analysis}
 
-Note that the equation is centered using a center tab stop. Be sure that the symbols in your equation have been defined before or immediately following the equation. Use ``(1)'', not ``Eq. (1)'' or ``equation (1)'', except at the beginning of a sentence: ``Equation (1) is\ldots''
+To better understand the baseline agents we compete against, I designed a controlled experiment probing their robustness to weak opponents. The hypothesis was that a truly robust agent should win nearly 100\% of games against an opponent that barely functions.
 
-\subsection{Some Common Mistakes}
-\begin{itemize}
-
-
-\item The word ``data'' is plural, not singular.
-\item The subscript for the permeability of vacuum ?0, and other common scientific constants, is zero with subscript formatting, not a lowercase letter ``o''.
-\item In American English, commas, semi-/colons, periods, question and exclamation marks are located within quotation marks only when a complete thought or name is cited, such as a title or full quotation. When quotation marks are used, instead of a bold or italic typeface, to highlight a word or phrase, punctuation should appear outside of the quotation marks. A parenthetical phrase or statement at the end of a sentence is punctuated outside of the closing parenthesis (like this). (A parenthetical sentence is punctuated within the parentheses.)
-\item A graph within a graph is an ``inset'', not an ``insert''. The word alternatively is preferred to the word ``alternately'' (unless you really mean something that alternates).
-\item Do not use the word ``essentially'' to mean ``approximately'' or ``effectively''.
-\item In your paper title, if the words ``that uses'' can accurately replace the word ``using'', capitalize the ``u''; if not, keep using lower-cased.
-\item Be aware of the different meanings of the homophones ``affect'' and ``effect'', ``complement'' and ``compliment'', ``discreet'' and ``discrete'', ``principal'' and ``principle''.
-\item Do not confuse ``imply'' and ``infer''.
-\item The prefix ``non'' is not a word; it should be joined to the word it modifies, usually without a hyphen.
-\item There is no period after the ``et'' in the Latin abbreviation ``et al.''.
-\item The abbreviation ``i.e.'' means ``that is'', and the abbreviation ``e.g.'' means ``for example''.
-
-\end{itemize}
-
-
-\section{USING THE TEMPLATE}
-
-Use this sample document as your LaTeX source file to create your document. Save this file as {\bf root.tex}. You have to make sure to use the cls file that came with this distribution. If you use a different style file, you cannot expect to get required margins. Note also that when you are creating your out PDF file, the source file is only part of the equation. \emph{Your \TeX\ $\rightarrow$ PDF filter determines the output file size. Even if you make all the specifications to output a letter file in the source - if you filter is set to produce A4, you will only get A4 output.}
-
-It is impossible to account for all possible situation, one would encounter using \TeX. If you are using multiple \TeX\ files you must make sure that the ``MAIN`` source file is called root.tex - this is particularly important if your conference is using PaperPlaza's built in \TeX\ to PDF conversion tool.
-
-\subsection{Headings, etc}
-
-Text heads organize the topics on a relational, hierarchical basis. For example, the paper title is the primary text head because all subsequent material relates and elaborates on this one topic. If there are two or more sub-topics, the next level head (uppercase Roman numerals) should be used and, conversely, if there are not at least two sub-topics, then no subheads should be introduced. Styles named ``Heading 1'', ``Heading 2'', ``Heading 3'', and ``Heading 4'' are prescribed.
-
-\subsection{Figures and Tables}
-
-Positioning Figures and Tables: Place figures and tables at the top and bottom of columns. Avoid placing them in the middle of columns. Large figures and tables may span across both columns. Figure captions should be below the figures; table heads should appear above the tables. Insert figures and tables after they are cited in the text. Use the abbreviation ``Fig. 1'', even at the beginning of a sentence.
+I implemented a \texttt{RandomAgent} that makes intentionally weak shots: velocity uniformly sampled from 0.5--1.5 m/s (too slow for reliable pocketing), horizontal angle uniformly random from 0--360 degrees, vertical angle random from 0--90 degrees, and random spin parameters. This agent almost never pockets balls intentionally and provides minimal challenge.
 
 \begin{table}[h]
-\caption{An Example of a Table}
-\label{table_example}
+\caption{Robustness Test: Baseline Agents vs RandomAgent (1000 games)}
+\label{tab:robustness}
 \begin{center}
-\begin{tabular}{|c||c|}
+\begin{tabular}{|l|c|c|c|}
 \hline
-One & Two\\
+\textbf{Agent} & \textbf{Win Rate} & \textbf{Loss Rate} & \textbf{Avg Shots} \\
 \hline
-Three & Four\\
+BasicAgent & 74.6\% & 25.1\% & 42.6 \\
+BasicAgentPro & 81.7\% & 18.2\% & 23.9 \\
 \hline
 \end{tabular}
 \end{center}
 \end{table}
 
+The results in Table~\ref{tab:robustness} were surprising: even against this nearly-passive opponent, BasicAgent loses 25\% and BasicAgentPro loses 18\% of games. Since \texttt{RandomAgent} almost never pockets balls intentionally, these losses must occur when the baseline agent defeats itself.
 
-   \begin{figure}[thpb]
+Analysis of individual game logs revealed three primary failure modes. First, \textbf{premature 8-ball pocketing}: the agent pockets the 8-ball before clearing all own balls, resulting in immediate loss. This occurs when the 8-ball happens to be near a pocket and the agent's shot inadvertently sends it in. Second, \textbf{scratching on the 8-ball shot}: even when the agent correctly saves the 8-ball for last, it sometimes scratches (pockets the cue ball) on the winning shot, which results in loss by rule. Third, \textbf{other foul-related losses}: various sequences of fouls can lead to loss even against a non-pocketing opponent.
+
+This 18--25\% ``self-defeat'' rate reveals a fundamental limitation of greedy optimization approaches: they pursue high-reward pocketing actions without adequately considering game-ending foul risks. A shot that pockets the target ball with 95\% probability but risks the 8-ball with 5\% probability has negative expected value if the 8-ball risk means immediate loss.
+
+This insight directly motivated our exploration of look-ahead methods like MCTS, which can simulate action consequences and reject risky shots before execution. It also suggested that learning-based approaches might benefit from explicitly modeling foul risks, though as we shall see, this proved difficult to achieve in practice.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{REINFORCEMENT LEARNING WITH SAC}
+
+\subsection{Motivation}
+
+Reinforcement learning offers the promise of discovering optimal strategies through interaction, without requiring expert knowledge. Unlike supervised learning, RL agents can potentially discover novel strategies that surpass human-designed heuristics. I chose Soft Actor-Critic (SAC) \cite{haarnoja2018soft} for its sample efficiency and stability in continuous action spaces, which seemed well-suited to billiards' 5-dimensional continuous action space.
+
+The fundamental appeal of RL for billiards lies in its ability to learn from experience: an agent that plays millions of games should, in theory, develop intuition for shot selection, position play, and risk management that would be difficult to hand-code.
+
+\subsection{SAC Architecture}
+
+\subsubsection{State Representation}
+
+I designed a 64-dimensional state encoding with semantic grouping to capture all game-relevant information while maintaining a fixed input size regardless of how many balls remain on the table.
+
+The state vector consists of six components. First, the \textbf{cue ball} is represented by 2 dimensions encoding its position $(x, y)$ normalized to $[0, 1]$. Second, \textbf{own balls} occupy 21 dimensions representing 7 balls with 3 features each (position and pocketed status), sorted by distance to the cue ball to provide implicit priority ordering. Third, \textbf{opponent balls} follow the same 21-dimensional structure. Fourth, the \textbf{8-ball} receives special 3-dimensional treatment due to its game-ending significance (position and pocketed flag). Fifth, \textbf{pocket positions} contribute 12 dimensions encoding the $(x, y)$ coordinates of all 6 pockets, providing explicit target locations for shot selection. Finally, \textbf{global information} uses 5 dimensions to encode remaining ball counts for both sides, turn indicator, and game phase (whether targeting the 8-ball).
+
+The distance-based sorting provides implicit priority hints while maintaining permutation consistency across episodes. Pocketed balls are encoded with position $(0, 0)$ and pocketed flag $1$ to distinguish them from balls near the origin.
+
+\subsubsection{Network Architecture}
+
+The \textbf{Actor} implements a Gaussian policy that outputs a probability distribution over actions:
+\begin{equation}
+\pi_\theta(a|s) = \mathcal{N}(\mu_\theta(s), \sigma_\theta(s)^2)
+\end{equation}
+The network consists of three hidden layers with dimensions [256, 256, 128] and ReLU activations, outputting mean and log-variance for each of the 5 action dimensions: velocity $V_0$, horizontal angle $\phi$, vertical angle $\theta$, and spin parameters $a$ and $b$.
+
+The \textbf{Critic} employs twin Q-networks to mitigate overestimation bias, a common issue in value-based RL. The target Q-value is computed as:
+\begin{equation}
+Q_{target} = r + \gamma \min_{i=1,2} Q_{\phi_i'}(s', a') - \alpha \log \pi(a'|s')
+\end{equation}
+where $\gamma = 0.99$ is the discount factor and $\alpha$ is the automatically-tuned temperature parameter that balances exploration and exploitation.
+
+\subsection{Reward Engineering}
+
+Reward design proved to be one of the most challenging aspects of this project. I developed a multi-component reward function to provide denser feedback than simple win/loss signals:
+\begin{equation}
+r = r_{pocket} + r_{turn} + r_{foul} + r_{defense} + r_{terminal}
+\end{equation}
+
+The \textbf{pocketing reward} uses a proportional value system to evaluate ball-pocketing outcomes at different game stages. A critical design requirement is that a single shot may pocket both own balls and opponent balls simultaneously, and the reward function must properly evaluate such mixed outcomes.
+
+The reward for pocketing own balls uses proportional scaling:
+\[
+r_{own} = \frac{n_{pocketed}}{n_{remaining}} \times C_1
+\]
+where $C_1 = 100$ is a scaling constant. Similarly, the penalty for pocketing opponent balls uses proportional scaling:
+\[
+r_{opponent} = -\frac{n_{opponent\_pocketed}}{n_{opponent\_remaining}} \times C_2
+\]
+where $C_2 = 100$. The total pocketing reward is the sum:
+\[
+r_{pocket} = r_{own} + r_{opponent}
+\]
+
+This proportional design serves two purposes. First, it reflects stage-dependent strategic value: pocketing a ball when only 2 remain (50\% progress) provides twice the reward as pocketing when 4 remain (25\% progress), reflecting the increased importance of each ball as the game progresses. Second, it enables fair evaluation of mixed outcomes: if a shot pockets 1 own ball (from 4 remaining) and 1 opponent ball (from 3 remaining), the net reward is
+\[
+\frac{1}{4} \times 100 - \frac{1}{3} \times 100 = 25 - 33.3 = -8.3
+\]
+correctly signaling that helping the opponent clear their balls outweighs the benefit of pocketing one's own ball in this scenario.
+
+The \textbf{turn dynamics} component provides $+10$ for retaining turn (successful pocket or opponent foul) and $-5$ for losing turn, encouraging aggressive play that maintains initiative.
+
+The \textbf{foul penalties} are graded by severity: scratch (pocketing cue ball) receives $-20$, wrong ball first contact receives $-15$, no rail contact after cue ball hits object ball receives $-10$, and complete miss (no contact) receives $-25$.
+
+The \textbf{defense reward} was designed to provide $+5$ retroactively when the opponent fails on their turn (misses or fouls), encouraging defensive positioning. However, this component was not used in the actual training experiments. The rationale was that defense rewards are only meaningful against strong opponents who can capitalize on positioning mistakes; against weaker opponents in self-play or simplified scenarios, defensive positioning provides minimal advantage. Since the RL agent never progressed to training against strong opponents, this reward component remained disabled in all experiments.
+
+The \textbf{terminal rewards} for game outcomes were a critical design variable. I experimented with both large ($\pm 1000$) and compact ($\pm 100$) scales, as well as different draw penalties, which proved to be the most consequential design choice.
+
+\subsection{Initial Approach: Training Against BasicAgent}
+
+My initial strategy followed a curriculum learning approach with three stages of increasing difficulty. Stage 1 (15,000 episodes) focused on training against BasicAgent only, targeting greater than 70\% win rate. The goal was to learn legal shots and basic pocketing before facing stronger opponents. Stage 2 (25,000 episodes) introduced mixed opponents: 60\% BasicAgent, 30\% PhysicsAgent, and 10\% self-play, targeting greater than 40\% win rate against PhysicsAgent. Stage 3 (30,000 episodes) added MCTS opponents with the mixture 20\% BasicAgent, 30\% PhysicsAgent, 20\% MCTS, and 30\% self-play.
+
+This curriculum was designed to gradually expose the agent to stronger opponents while building fundamental skills. However, the results were disappointing.
+
+\subsubsection{Complete Failure Against BasicAgent}
+
+When I removed the environment noise (which adds small perturbations to shot execution), the trained agent achieved \textbf{0\% win rate} against BasicAgent. The agent could not pocket a single ball reliably.
+
+When environment noise was enabled, the agent occasionally won games, but analysis revealed that \textbf{100\% of these wins came from opponent errors}---specifically, cases where BasicAgent accidentally pocketed the 8-ball prematurely or scratched. The agent itself contributed nothing to these victories.
+
+This result led to a critical insight: BasicAgent, despite being a ``basic'' opponent, is far too strong as an initial teacher for RL. The agent needs to experience successful pocketing to learn, but against BasicAgent, random exploration almost never produces successful outcomes. Without positive reward signals, the agent cannot learn which actions are good.
+
+\subsection{Pivot to Self-Play with Ball Count Curriculum}
+
+Given that BasicAgent was too strong, I redesigned the training approach around pure self-play with a curriculum based on the number of balls on the table.
+
+\subsubsection{Ball Count Curriculum Design}
+
+Instead of varying opponent difficulty, I varied game complexity by controlling the number of balls. The \textbf{4-Ball Stage} represents the simplest possible game: one cue ball, one own ball, one opponent ball, and the 8-ball. This configuration provides the maximum probability of successful pocketing through random exploration, while still requiring the agent to learn the fundamental rule that the 8-ball must be pocketed last. The \textbf{6-Ball Stage} introduces two own balls and two opponent balls, plus cue and 8-ball, adding more complex decision-making about shot selection. The eventual goal was to train on the complete 16-ball game.
+
+For consistency in state representation, balls not present in simplified scenarios are marked as ``already pocketed'' in the state encoding, maintaining the 64-dimensional input throughout all stages.
+
+\subsubsection{Discovery of the Degenerate Strategy}
+
+Training on the 4-ball scenario with self-play revealed an unexpected and frustrating phenomenon. Rather than learning to pocket balls aggressively, the agent converged to a degenerate strategy.
+
+The game has a 60-shot limit, after which the winner is determined by who has pocketed more balls. The agent discovered that attempting to pocket balls carries risk: a missed shot might leave an easy opportunity for the opponent, and prematurely pocketing the 8-ball results in immediate loss. The ``optimal'' strategy in symmetric self-play became: avoid pocketing any balls, run out the clock, and hope for a favorable tie-breaker.
+
+\begin{table}[h]
+\caption{Self-Play with Large Rewards ($\pm$1000): Convergence to Degenerate Strategy}
+\label{tab:exp1}
+\begin{center}
+\begin{tabular}{|r|c|c|c|c|}
+\hline
+\textbf{Games} & \textbf{A Win} & \textbf{B Win} & \textbf{Draw} & \textbf{Avg Pockets} \\
+\hline
+800 & 45\% & 46\% & 9\% & 0.53 \\
+8,000 & 26\% & 26\% & 48\% & 0.25 \\
+200,000 & 25\% & 25\% & \textbf{51\%} & 0.32 \\
+\hline
+\end{tabular}
+\end{center}
+\end{table}
+
+Table~\ref{tab:exp1} shows this phenomenon quantitatively. Early in training (800 games), draws occurred in only 9\% of games, with active pocketing. But as training progressed, the draw rate climbed to 51\% by 200,000 games, with average pockets per game dropping from 0.53 to 0.32.
+
+\subsubsection{Reward Modifications to Counter Degenerate Strategy}
+
+I experimented with several reward modifications to discourage the degenerate strategy.
+
+\textbf{Compact Rewards ($\pm$100)} tested whether smaller reward magnitudes would reduce the perceived risk of aggressive play. As shown in Table~\ref{tab:exp2}, the results were nearly identical---47\% draw rate after 20,000 games.
+
+\begin{table}[h]
+\caption{Compact Rewards ($\pm$100): Same Degenerate Convergence}
+\label{tab:exp2}
+\begin{center}
+\begin{tabular}{|r|c|c|c|c|}
+\hline
+\textbf{Games} & \textbf{A Win} & \textbf{B Win} & \textbf{Draw} & \textbf{Active Rate} \\
+\hline
+800 & 46\% & 44\% & 10\% & 90\% \\
+8,000 & 27\% & 27\% & 46\% & 54\% \\
+20,000 & 26\% & 26\% & \textbf{47\%} & 52\% \\
+\hline
+\end{tabular}
+\end{center}
+\end{table}
+
+\textbf{Strict Draw Penalty} modified the reward function to penalize draws as severely as losses (draw penalty = $-100$, same as loss). This was the most successful intervention, reducing the draw rate to 36\% and increasing the active play rate to 64\%.
+
+\begin{table}[h]
+\caption{Strict Draw Penalty: Reduced Degenerate Behavior}
+\label{tab:exp3}
+\begin{center}
+\begin{tabular}{|r|c|c|c|c|}
+\hline
+\textbf{Games} & \textbf{A Win} & \textbf{B Win} & \textbf{Draw} & \textbf{Active Rate} \\
+\hline
+800 & 45\% & 44\% & 11\% & 89\% \\
+8,000 & 25\% & 26\% & 49\% & 51\% \\
+20,000 & 32\% & 32\% & \textbf{36\%} & \textbf{64\%} \\
+\hline
+\end{tabular}
+\end{center}
+\end{table}
+
+With the strict draw penalty, the agent finally learned to play the 4-ball game with reasonable competence, achieving approximately 50-50 win rates in self-play and averaging about 25 shots per game. This was encouraging---the agent had learned something about pocketing balls.
+
+\begin{figure}[h]
       \centering
-      \framebox{\parbox{3in}{We suggest that you use a text box to insert a graphic (which is ideally a 300 dpi TIFF or EPS file, with all fonts embedded) because, in an document, this method is somewhat more stable than directly inserting a picture.
-}}
-      %\includegraphics[scale=1.0]{figurefile}
-      \caption{Inductance of oscillation winding on amorphous
-       magnetic core versus DC bias magnetic field}
-      \label{figurelabel}
+\includegraphics[width=0.95\columnwidth]{figures/sac_experiments_comparison.pdf}
+\caption{SAC training curves comparing three reward configurations. The strict draw penalty successfully reduced the draw rate and encouraged more aggressive play, though all configurations show convergence toward conservative equilibria.}
+\label{fig:sac_curves}
    \end{figure}
    
+\subsubsection{Failure to Scale: The 6-Ball Collapse}
 
-Figure Labels: Use 8 point Times New Roman for Figure labels. Use words rather than symbols or abbreviations when writing Figure axis labels to avoid confusing the reader. As an example, write the quantity ``Magnetization'', or ``Magnetization, M'', not just ``M''. If including units in the label, present them within parentheses. Do not label axes only with units. In the example, write ``Magnetization (A/m)'' or ``Magnetization {A[m(1)]}'', not just ``A/m''. Do not label axes with a ratio of quantities and units. For example, write ``Temperature (K)'', not ``Temperature/K.''
+Encouraged by success in the 4-ball scenario, I attempted to train on the 6-ball configuration. The results were disheartening: the agent immediately reverted to the degenerate strategy, despite the strict draw penalty that had worked for 4 balls.
 
-\section{CONCLUSIONS}
+I experimented with numerous reward function modifications: increasing pocketing rewards, adding intermediate progress bonuses, penalizing low-velocity shots, and rewarding ball proximity to pockets. None of these interventions prevented convergence to conservative play.
 
-A conclusion section is not required. Although a conclusion may review the main points of the paper, do not replicate the abstract as the conclusion. A conclusion might elaborate on the importance of the work or suggest applications and extensions. 
+\subsection{Root Cause Analysis}
 
-\addtolength{\textheight}{-12cm}   % This command serves to balance the column lengths
-                                  % on the last page of the document manually. It shortens
-                                  % the textheight of the last page by a suitable amount.
-                                  % This command does not take effect until the next page
-                                  % so it should come on the page before the last. Make
-                                  % sure that you do not shorten the textheight too much.
+Through this extensive experimentation, I identified several fundamental reasons why reinforcement learning struggles with billiards.
+
+\subsubsection{The Sequential Constraint Problem}
+
+Billiards has a critical sequential constraint: the 8-ball must be pocketed \textbf{last}, after all own balls are cleared. Pocketing the 8-ball prematurely results in immediate loss. This creates a severe reward design challenge.
+
+The agent must learn to pocket own balls aggressively while avoiding the 8-ball entirely until the endgame. But how can a reward function communicate this temporal constraint? If we penalize 8-ball contact, the agent becomes overly conservative. If we don't, the agent frequently loses by premature 8-ball pockets.
+
+In the 4-ball scenario with only one own ball, this constraint is manageable. But with more balls, the agent must plan multi-shot sequences where early decisions affect late-game 8-ball positioning---a level of temporal abstraction that appears beyond current RL capabilities without explicit planning.
+
+\subsubsection{Sparse Rewards and Credit Assignment}
+
+Meaningful feedback occurs only after complete physics simulation of each shot. There is no gradient signal for ``almost good'' shots---a ball that stops one inch from a pocket provides the same reward as a complete miss. With games lasting 20+ shots, attributing terminal rewards to specific early-game decisions is extremely difficult.
+
+\subsubsection{High Precision Requirements}
+
+A $1^\circ$ error in the shooting angle $\phi$ can mean the difference between pocketing a ball and missing entirely. The reward landscape is essentially discontinuous: tiny changes in action produce dramatically different outcomes. This makes gradient-based optimization extremely challenging.
+
+\subsubsection{Exploration Inefficiency}
+
+Random Gaussian exploration in the 5-dimensional action space almost never produces successful pockets. The probability of randomly selecting an action that pockets a ball is vanishingly small, so the agent receives almost no positive reward signals during early training.
+
+\subsection{Lessons Learned from RL}
+
+The RL experiments, despite their ultimate failure, yielded valuable insights. First, \textbf{reward structure matters more than magnitude}: the strict draw penalty was more effective than scaling rewards by 10x. Second, \textbf{learned rules do not generalize to increased complexity}: while the agent learned to respect the 8-ball-last rule in the 4-ball scenario, this sequential constraint knowledge failed to transfer when scaling to 6 balls, causing immediate regression to degenerate play. Third, \textbf{sequential constraints are hard to learn}: the 8-ball-last rule requires temporal reasoning that pure RL struggles to acquire. Fourth, \textbf{self-play finds Nash equilibria, not optimal play}: symmetric training converges to stable but potentially suboptimal strategies.
+
+The fundamental conclusion is sobering: for high-precision continuous control with binary outcomes and complex sequential constraints, end-to-end RL requires prohibitive sample complexity. When a fast, accurate simulator is available, search-based methods that can explicitly evaluate action consequences are far more practical.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{IMITATION LEARNING}
 
+Given the fundamental challenges encountered with reinforcement learning, I pivoted to imitation learning. However, the primary motivation was not merely the failure of RL, but a practical constraint: the competition requires real-time decision-making with a strict time limit of 3 minutes per game (1.5 minutes per player). While my teammate had developed an excellent MCTS agent with 400 simulations and 64 candidate actions per decision, achieving 96.9\% win rate against BasicAgent, this strong policy exceeded the time budget during actual gameplay. To address this limitation, I designed an imitation learning pipeline to directly learn from the MCTS expert, with the goal of approximating its decision quality while achieving real-time inference speed through a lightweight neural network.
 
+The hypothesis was that by observing expert behavior, a neural network could learn to approximate the MCTS policy without requiring explicit reward signals, extensive exploration, or the computational overhead of tree search. This approach would enable fast, single-forward-pass decisions that respect the time constraints while maintaining competitive performance.
+
+\subsection{Expert Data Collection}
+
+\subsubsection{Data Collection Pipeline}
+
+I implemented a parallel data collection system using Python's ProcessPoolExecutor to efficiently gather expert demonstrations. The expert agent was the long\_mcts implementation with 400 MCTS simulations and 64 candidate actions per decision, representing the strongest available policy. To generate diverse game states, the expert played against BasicAgent, which provided a reasonable opponent that creates varied board configurations.
+
+The parallel infrastructure deployed 100 worker processes across a multi-core server, achieving a collection rate of approximately 1,800 games per hour (based on measurements from long\_mcts games, accounting for data collection overhead). Each game generates multiple state-action pairs (one per expert decision), and over several weeks of continuous collection, the pipeline accumulated a dataset of \textbf{1,787,130 state-action pairs}. This represents one of the largest billiards imitation learning datasets reported in the literature.
+
+\subsubsection{State Representation}
+
+I designed an 80-dimensional state representation that captures all information relevant to shot selection. The \textbf{cue ball} occupies 3 dimensions encoding its $(x, y)$ position normalized to the table dimensions and a binary flag indicating whether it has been pocketed (which would indicate a foul state). The \textbf{15 object balls} each receive 3 dimensions for position and pocketed status, totaling 45 dimensions. Ball positions are normalized to $[0, 1]$ based on table dimensions, and pocketed balls are encoded as $(0, 0, 1)$ to distinguish them from balls that happen to be near the table origin.
+
+The \textbf{target mask} provides 15 binary dimensions indicating which balls are valid targets for the current player. This is crucial information: in 8-ball pool, players can only legally target their assigned group (solids or stripes) plus the 8-ball when appropriate. The \textbf{pocket positions} contribute 12 dimensions encoding the $(x, y)$ coordinates of all 6 pockets, providing the network with explicit target locations rather than requiring it to learn pocket positions implicitly.
+
+Finally, \textbf{game statistics} occupy 5 dimensions: counts of remaining own and opponent balls, a flag indicating whether the player is currently targeting the 8-ball, whether the 8-ball has been pocketed, and the total count of valid targets. These features provide high-level game state information that might influence shot selection strategy.
+
+\subsubsection{Action Representation}
+
+The action labels present a careful encoding challenge, particularly for angular quantities. The velocity $V_0 \in [0.5, 8.0]$ m/s is simply normalized to $[0, 1]$ through linear scaling. The horizontal shooting angle $\phi \in [0^\circ, 360^\circ)$ requires special treatment due to its circular nature: an angle of $359^\circ$ is close to $1^\circ$, but naive encoding would treat them as maximally distant. I addressed this by encoding $\phi$ as the tuple $(\sin\phi, \cos\phi)$, which maps the circular domain to a continuous 2D space where angular proximity is preserved as Euclidean distance.
+
+The vertical angle $\theta \in [0^\circ, 90^\circ]$ (cue elevation) is normalized to $[0, 1]$, and the spin parameters $a, b \in [-0.5, 0.5]$ are kept in their original range. The complete action label is thus 6-dimensional: normalized velocity, sine and cosine of horizontal angle, normalized vertical angle, and two spin components.
+
+\subsection{Network Architectures}
+
+I experimented with five architectures of increasing sophistication, each attempting to address limitations discovered in the previous approach.
+
+\subsubsection{Architecture 1: MLP Networks}
+
+The initial approach used feedforward networks with Transformer-based architectures, varying capacity to understand the impact of model size. The \textbf{small} configuration used 4 hidden layers with 256 units each, totaling approximately 8 million parameters. The \textbf{large} configuration used 8 Transformer blocks with 512 hidden dimensions and 8 attention heads, reaching 26 million parameters. Both used GELU activations, layer normalization, and dropout for regularization.
+
+The loss function required careful weighting across action components, as the horizontal angle $\phi$ is most critical for pocketing accuracy:
+\begin{equation}
+\mathcal{L} = \mathcal{L}_{V_0} + 2\mathcal{L}_{\phi} + \mathcal{L}_{\theta} + 0.5\mathcal{L}_{spin}
+\end{equation}
+The doubled weight on $\mathcal{L}_{\phi}$ reflects that angle errors have the most dramatic impact on shot outcomes. The angle loss includes a regularization term to encourage the predicted $(\sin\phi, \cos\phi)$ to lie on the unit circle:
+\begin{equation}
+\mathcal{L}_{\phi} = MSE(\sin\phi) + MSE(\cos\phi) + 0.1\|\sin^2\phi + \cos^2\phi - 1\|^2
+\end{equation}
+
+\subsubsection{Architecture 2: Transformer-based}
+
+Motivated by the observation that billiards involves reasoning about relationships between balls, I experimented with a Transformer architecture that treats balls as a set of tokens. Each ball is embedded by concatenating its position encoding with a learned type embedding (cue ball, own ball, opponent ball, or 8-ball). These embeddings pass through multi-head self-attention layers with 8 attention heads, allowing the network to learn which ball relationships are relevant for shot selection.
+
+The attended ball representations are aggregated through global average pooling, and the resulting vector feeds into separate prediction heads for each action component. The hypothesis was that attention would help the network focus on relevant balls rather than treating all 16 balls uniformly.
+
+\subsubsection{Architecture 3: Discrete Angle Classification}
+
+Analysis of early training runs revealed that the horizontal angle $\phi$ was the most challenging component to predict accurately. Even small angular errors (5--10 degrees) often mean the difference between pocketing a ball and missing entirely. Motivated by this observation, I converted $\phi$ prediction from regression to classification.
+
+The 360-degree range is discretized into 36 bins of 10 degrees each. The network outputs a 36-dimensional softmax distribution, and training uses cross-entropy loss for $\phi$ while maintaining MSE loss for other action components. At inference time, the predicted angle is the center of the highest-probability bin. This approach avoids the ``averaging'' problem to some extent: the network can learn a multi-modal distribution over bins rather than being forced to output a single point estimate.
+
+I added LayerNorm before the final classification layer and clamped logits to $[-10, 10]$ to prevent numerical instability during early training when the network's predictions are essentially random.
+
+\subsubsection{Architecture 4: Data Augmentation}
+
+Billiards exhibits geometric symmetries that can be exploited to augment training data. A mirrored version of any valid state-action pair is equally valid, effectively multiplying the dataset size. I implemented four transformations that together provide 4× data augmentation.
+
+The \textbf{original} data is used unchanged. \textbf{X-mirror} reflects the table across the horizontal axis: all $y$ coordinates become $1-y$, and the shooting angle becomes $-\phi$. \textbf{Y-mirror} reflects across the vertical axis: $x$ becomes $1-x$, and $\phi$ becomes $180^\circ - \phi$. Finally, \textbf{180-degree rotation} applies both reflections: $(x, y)$ becomes $(1-x, 1-y)$, and $\phi$ becomes $\phi + 180^\circ$.
+
+These transformations preserve the validity of state-action pairs while exposing the network to more diverse configurations during training.
+
+\subsubsection{Architecture 5: Equivariant Network}
+
+The most sophisticated architecture explicitly encodes the permutation symmetry of object balls. The ordering of balls in the input should not affect the output---swapping the positions of Ball 3 and Ball 7 in the state representation should not change the optimal action.
+
+I designed a Set Attention architecture with four key components. The \textbf{BallEncoder} is a shared MLP that independently processes each ball's features, producing per-ball embeddings. The \textbf{SetAttentionBlocks} stack 8 layers of self-attention over the ball set, allowing information to flow between ball representations while maintaining permutation equivariance. \textbf{CrossAttention} allows the cue ball embedding to query all object ball embeddings, reflecting the asymmetric role of the cue ball in shot selection. Finally, \textbf{target-weighted pooling} aggregates ball representations using the target mask as attention weights, emphasizing balls that are valid targets for the current shot.
+
+Separate prediction heads output $V_0$, discrete $\phi$ (72 bins), $\theta$, and spin parameters. This architecture explicitly encodes the inductive bias that ball identity should not matter, only ball positions and target status.
+
+\subsection{Training Results}
+
+Table~\ref{tab:il_results} summarizes the training outcomes across all architectures. The validation loss varies significantly across models, though direct comparison is complicated by the different loss functions used (MSE vs cross-entropy for discrete models).
+
+\begin{table}[h]
+\caption{Imitation Learning Training Results}
+\label{tab:il_results}
+\begin{center}
+\begin{tabular}{|l|c|c|c|c|}
+\hline
+\textbf{Model} & \textbf{Params} & \textbf{Val Loss} & \textbf{Best Epoch} & \textbf{$\phi$ Acc} \\
+\hline
+Large MLP & 26M & 0.547 & 40 & - \\
+Small MLP & 8M & 0.663 & 47 & - \\
+Aug Small & 8M & 0.636 & 106 & - \\
+Discrete 36 & 26M & 3.76 & 60 & 50.2\% \\
+Equivariant & 26M & 2.97 & 25 & 16\% \\
+\hline
+\end{tabular}
+\end{center}
+\end{table}
+
+The Large MLP achieved the lowest validation loss (0.547) among continuous models, reaching its best performance at epoch 40. The smaller 8M parameter model showed higher loss (0.663), suggesting that model capacity matters for this task. Data augmentation provided modest improvement (0.636 vs 0.663 for the small model) but required significantly more training epochs (106 vs 47) to converge.
+
+The discrete classification approach with 36 bins achieved 50.2\% accuracy on the $\phi$ prediction task (where random guessing would yield $\sim$2.8\% for 36 bins). This represents substantial improvement over random chance, translating to an expected angular error of approximately 18 degrees. However, this precision is still insufficient for reliable pocketing, which typically requires sub-degree accuracy. The model reached its best validation loss (3.76) at epoch 60, demonstrating stable training convergence.
+
+The equivariant network achieved 16\% accuracy on the discrete $\phi$ prediction (where random guessing would yield $\sim$1.4\% for 72 bins). While this is substantially above chance, it translates to an expected angular error of approximately 15 bins or 75 degrees---far too large for reliable pocketing. The best model was evaluated against BasicAgent, achieving a \textbf{35.5\% win rate}, substantially below the expert's performance.
+
+\subsection{The Multi-Modal Action Problem}
+
+Through careful analysis of the training data and model predictions, the fundamental challenge became clear: \textbf{for any given state, multiple distinct actions can be equally optimal, and this multi-modality defeats standard supervised learning approaches}.
+
+Consider a concrete example: a game state where either Ball 3 or Ball 7 could be pocketed with similar difficulty. The MCTS expert, being stochastic due to random tie-breaking in its search, might choose Ball 3 in some games and Ball 7 in others. These two choices correspond to completely different shooting angles---perhaps $\phi = 45^\circ$ for Ball 3 and $\phi = 220^\circ$ for Ball 7.
+
+When training with MSE loss, the network is incentivized to minimize squared error across all examples. Given similar states with conflicting labels, the optimal prediction under MSE is the \textit{mean}:
+\begin{equation}
+\hat{\phi} = \frac{\phi_{Ball3} + \phi_{Ball7}}{2} = \frac{45^\circ + 220^\circ}{2} = 132.5^\circ
+\end{equation}
+
+This averaged angle of $132.5^\circ$ pockets \textit{neither} ball. The network achieves low training loss by predicting the geometric center of a multi-modal distribution, but this center is not a valid action. This is a fundamental limitation of behavior cloning with MSE loss when expert behavior exhibits inherent variability.
+
+I attempted several approaches to mitigate this problem. Converting $\phi$ to discrete classification with 36 bins allows the network to output a distribution over angles rather than a point estimate. In principle, this could represent multi-modal predictions. The Discrete 36 model achieved 50.2\% accuracy, demonstrating that classification can improve over regression. However, this precision is still insufficient for reliable pocketing. Mixture Density Networks (MDNs) could explicitly model multiple modes by predicting parameters of a Gaussian mixture, but this adds significant complexity and requires careful tuning of the number of mixture components. The most principled solution would be target conditioning: if the network also received information about which ball to target, the action distribution would become unimodal. However, this would require the expert to output target information, which MCTS does not naturally provide.
+
+\subsection{Overfitting and Distribution Shift}
+
+All models showed classic overfitting patterns during training. The training loss continued decreasing monotonically, while validation loss plateaued early and eventually began increasing. The gap between training and validation performance widened steadily over epochs.
+
+This behavior suggests that despite 1.78 million samples, the dataset does not adequately cover the state space for robust generalization. The billiards state space is effectively infinite---continuous ball positions in a high-dimensional space---and expert behavior varies based on subtle factors that may not be fully captured in our 80-dimensional encoding.
+
+More insidiously, even if the network achieves low validation loss, it may fail catastrophically during actual gameplay due to distribution shift. The validation set consists of states generated by expert-vs-opponent gameplay, but when the trained network plays, it may visit states that never appear in training data. A single bad prediction can leave the game in an unusual configuration, leading to further unfamiliar states and compounding errors.
+
+\subsection{Lessons Learned from Imitation Learning}
+
+The imitation learning experiments, while unsuccessful in producing a strong agent, yielded several important insights for future work.
+
+First, \textbf{multi-modal action distributions fundamentally defeat MSE-based behavior cloning}. When experts exhibit varied behavior for similar states, the learned policy predicts invalid averaged actions. This is not merely a training issue but a fundamental mismatch between the loss function and the problem structure.
+
+Second, \textbf{angular precision requirements are extreme for billiards}. With 36 bins spanning 360 degrees, each bin covers 10 degrees. The Discrete 36 model achieved 50.2\% accuracy, translating to an expected angular error of approximately 18 degrees. While this is substantially better than regression-based approaches, successful pocketing typically requires sub-degree precision. The Equivariant network with 72 bins (5 degrees per bin) achieved only 16\% accuracy, demonstrating that finer discretization alone does not solve the problem. Achieving sufficient angular accuracy through supervised learning would require either much finer discretization with significantly more data or a fundamentally different approach.
+
+Third, \textbf{distribution shift causes compounding errors during deployment}. Even with 1.78 million training samples, the learned policy visits states outside the training distribution during gameplay, leading to increasingly poor predictions over the course of a game.
+
+Fourth, \textbf{inductive biases help but do not solve the core problem}. The equivariant network architecture correctly encodes permutation symmetry, and the attention mechanism learns to focus on relevant balls. However, these architectural improvements cannot address the fundamental multi-modality issue.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{COMPARATIVE ANALYSIS}
 
+\begin{table}[h]
+\caption{Agent Performance Comparison}
+\label{tab:comparison}
+\begin{center}
+\begin{tabular}{|l|c|c|}
+\hline
+\textbf{Agent} & \textbf{vs Basic} & \textbf{vs Pro} \\
+\hline
+Physics-based & 60\% & $\sim$40\%* \\
+SAC (RL) & Failed & - \\
+Imitation Learning & 35.5\% & - \\
+\hline
+BasicAgentPro & 85.4\% & - \\
+future (MCTS) & 57.3\% & 33.1\% \\
+\textbf{long\_mcts} & \textbf{96.9\%} & \textbf{80.6\%} \\
+\hline
+\end{tabular}
+\end{center}
+\footnotesize{*Estimated}
+\end{table}
 
+The results demonstrate a clear hierarchy among approaches, with MCTS-based agents significantly outperforming all learning methods.
+
+The imitation learning agent achieved only 35.5\% win rate against BasicAgent, substantially lower than the 96.9\% achieved by the MCTS expert it was trained to imitate. This dramatic performance gap directly illustrates the multi-modal action problem: the learned policy predicts ``averaged'' actions that correspond to neither of the expert's valid shot choices, resulting in frequent misses.
+
+Among MCTS variants, \textbf{long\_opening} represents the final optimized solution, incorporating an opening safety strategy for unbroken racks. This variant achieves 96.2\% win rate against BasicAgent and 79.5\% against BasicAgentPro, demonstrating that strategic opening play provides additional robustness while maintaining strong overall performance. The performance is comparable to the base \textbf{long\_mcts} (96.9\% vs Basic, 80.6\% vs Pro), with a slight trade-off that prioritizes safe opening play.
+
+MCTS succeeds where learning methods fail for several fundamental reasons. First, MCTS provides \textbf{explicit look-ahead evaluation}: by simulating action consequences before execution, MCTS avoids the 18--25\% ``self-defeat'' rate observed in greedy baselines (Section II-B). The agent can reject shots that risk pocketing the 8-ball prematurely or scratching, something that RL struggled to learn implicitly.
+
+Second, MCTS requires \textbf{no training phase}: it works directly from the physics engine without collecting millions of samples or tuning hyperparameters. This is a significant practical advantage when a fast, accurate simulator is available.
+
+Third, MCTS \textbf{naturally handles multi-modality}: rather than learning a single averaged action, MCTS explicitly explores multiple shot options and selects the best one. This completely bypasses the averaging problem that plagues imitation learning with MSE loss.
+
+Fourth, MCTS provides \textbf{robustness through noise testing}: by evaluating each candidate action with random perturbations, MCTS can identify shots that are robust to execution noise, leading to more reliable performance in practice.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{CONCLUSION}
+
+This project systematically explored learning-based approaches for billiards AI, ultimately demonstrating why search-based methods like MCTS remain superior for this domain.
+
+\subsection{Summary of Approaches}
+
+The \textbf{reinforcement learning} investigation developed a complete Soft Actor-Critic framework with careful reward engineering and curriculum learning. The initial approach of training against BasicAgent revealed that even this ``basic'' opponent is too strong for RL exploration---the agent achieved 0\% win rate when environment noise was removed, with all wins attributable to opponent errors rather than learned skill.
+
+Pivoting to self-play with a ball count curriculum showed promise in the simplified 4-ball scenario. However, the agent discovered a reward-induced degenerate equilibrium: avoiding all pocketing attempts to run out the 60-shot clock. Strict draw penalties successfully countered this behavior for 4 balls, reducing draw rates from 51\% to 36\%. But scaling to 6 balls immediately caused regression to degenerate play, despite extensive reward function modifications.
+
+The root cause analysis identified the sequential constraint problem as fundamental: the 8-ball-last rule requires temporal reasoning that pure RL struggles to learn implicitly. Combined with sparse rewards, high precision requirements, and exploration inefficiency, these challenges make end-to-end RL impractical for billiards without prohibitive computational resources.
+
+The \textbf{imitation learning} investigation was motivated by the competition's real-time constraint: 3 minutes per game (1.5 minutes per player). While the MCTS expert achieved 96.9\% win rate, it exceeded the time budget. I collected 1.78 million state-action pairs from this expert and experimented with five increasingly sophisticated neural network architectures, aiming to achieve real-time inference while maintaining competitive performance. The Large MLP achieved the lowest validation loss, while the Equivariant Network with discrete angle classification achieved 16\% accuracy on the critical $\phi$ angle---substantially above random chance but far below the precision required for reliable pocketing.
+
+The fundamental limitation proved to be multi-modal action distributions: when multiple balls can be targeted from similar states, MSE loss causes the network to predict averaged actions that pocket neither target. The best imitation learning agent achieved only 35.5\% win rate against BasicAgent, compared to the expert's 96.9\%.
+
+\subsection{Key Insights}
+
+The most important insight from this project is that \textbf{algorithm choice must match problem structure}. Billiards presents a combination of challenges---high precision requirements, sparse rewards, sequential constraints, and multi-modal optimal actions---that current learning methods struggle to address simultaneously.
+
+When a fast, accurate physics simulator is available, search-based methods like MCTS enjoy decisive advantages. They can explicitly evaluate action consequences before commitment, naturally explore multiple shot options without averaging, and require no training phase or sample collection. The simulator provides the ``gradient signal'' that RL lacks: direct feedback on whether a proposed action would succeed.
+
+The 18--25\% self-defeat rate observed in greedy baselines (Section II-B) further illustrates the value of look-ahead: even competent shot-making is insufficient without considering game-ending foul risks. MCTS addresses this naturally through simulation, while RL must somehow learn to avoid these rare but catastrophic events from sparse terminal rewards.
+
+\subsection{Limitations and Future Work}
+
+Several limitations of this work suggest directions for future research. The RL experiments used a simplified 2D action space (velocity and horizontal angle only); the full 5D action space including elevation and spin might enable qualitatively different strategies. The imitation learning pipeline could be extended with target conditioning---providing the network with explicit information about which ball to target---which would convert the multi-modal problem into a unimodal one.
+
+More fundamentally, hybrid approaches that combine learning with search might achieve the best of both worlds. A learned value function could guide MCTS search toward promising regions of the action space, potentially reducing the computational cost of pure search while maintaining its robustness advantages. Alternatively, a learned policy could serve as a fast approximation for deployment, with MCTS used only for difficult decisions.
+
+\subsection{Concluding Remarks}
+
+The negative results in this project are themselves valuable contributions. They empirically demonstrate the boundaries of current learning methods on a concrete, well-defined task, and highlight the importance of careful algorithm selection based on problem characteristics. For high-precision continuous control with sparse rewards and sequential constraints, search-based methods remain the practical choice when simulation is available.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section*{CONTRIBUTIONS}
+
+\subsection*{My Contributions}
+
+I was responsible for the learning-based approaches and infrastructure development in this project, contributing the following components:
+
+\textbf{Physics-based agent baseline}: I implemented a geometric shot calculation agent that computes ghost ball positions, evaluates cut angles, and uses physics simulation to verify shot feasibility. This agent achieved 60\% win rate against BasicAgent and provided the foundation for understanding the problem requirements.
+
+\textbf{Opponent robustness analysis}: I designed and executed experiments using a RandomAgent to probe the robustness of baseline opponents. This analysis revealed that BasicAgent loses 25\% and BasicAgentPro loses 18\% of games through self-defeat (premature 8-ball pocketing, scratches), even against a nearly-passive opponent. This insight motivated the exploration of look-ahead methods.
+
+\textbf{Complete SAC reinforcement learning framework}: I developed a full Soft Actor-Critic implementation adapted for billiards, including the 64-dimensional state encoding, multi-component reward function, and curriculum learning infrastructure. The framework supports parallel training across multiple CPU workers, with careful handling of physics engine compatibility requirements.
+
+\textbf{Controlled RL experiments}: I designed and executed three systematic experiments comparing reward configurations (large vs compact terminal rewards, progressive vs strict draw penalties). These experiments demonstrated that reward structure matters more than magnitude and identified the degenerate equilibrium phenomenon in self-play training.
+
+\textbf{Imitation learning pipeline}: I built the complete data collection infrastructure using parallel ProcessPoolExecutor workers, accumulating 1.78 million expert state-action pairs. I designed the 80-dimensional state representation and 6-dimensional action encoding, and implemented five neural network architectures of increasing sophistication: MLP variants, Transformer-based attention, discrete angle classification, geometric data augmentation, and equivariant Set Attention networks.
+
+\textbf{Parallel evaluation framework}: I developed a robust parallel game simulation system for evaluating agents at scale, including output suppression for clean logging, timeout handling for stuck games, and detailed statistics collection. This framework enabled the systematic comparison of all agent variants.
+
+\textbf{Failure mode analysis}: I conducted comprehensive analysis of why learning methods fail for billiards, identifying the multi-modal action problem in imitation learning and the sequential constraint challenge in reinforcement learning. These insights contribute to understanding when learning-based approaches are appropriate for control problems.
+
+\subsection*{Teammate's Contributions}
+
+My teammate focused on the search-based approach, contributing:
+
+\textbf{MCTS agent development}: Design and implementation of the Monte Carlo Tree Search agent with configurable search depth, candidate count, and noise robustness testing.
+
+\textbf{Agent optimization}: Iterative improvements to MCTS parameters and evaluation heuristics, culminating in the long\_mcts configuration with 400 simulations and 64 candidates.
+
+\textbf{Final solution}: The final MCTS agent (long\_opening variant incorporating a safe opening strategy) achieved 96.2\% win rate against BasicAgent and 79.5\% against BasicAgentPro, representing our team's final submission.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\begin{thebibliography}{99}
+
+\bibitem{haarnoja2018soft} T. Haarnoja, A. Zhou, P. Abbeel, and S. Levine, ``Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor,'' in \textit{Proc. ICML}, 2018.
+
+\bibitem{ross2011reduction} S. Ross, G. Gordon, and D. Bagnell, ``A Reduction of Imitation Learning and Structured Prediction to No-Regret Online Learning,'' in \textit{Proc. AISTATS}, 2011.
+
+\bibitem{silver2016mastering} D. Silver et al., ``Mastering the Game of Go with Deep Neural Networks and Tree Search,'' \textit{Nature}, vol. 529, pp. 484-489, 2016.
+
+\bibitem{zaheer2017deep} M. Zaheer et al., ``Deep Sets,'' in \textit{Proc. NeurIPS}, 2017.
+
+\end{thebibliography}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section*{APPENDIX}
 
-Appendixes should appear before the acknowledgment.
+\subsection*{A. Hyperparameters}
+\label{app:hyperparams}
 
-\section*{ACKNOWLEDGMENT}
+\begin{table}[h]
+\caption{SAC Training Hyperparameters}
+\label{tab:sac_hyperparams}
+\begin{center}
+\begin{tabular}{|l|c|}
+\hline
+\textbf{Parameter} & \textbf{Value} \\
+\hline
+\multicolumn{2}{|c|}{\textit{Network Architecture}} \\
+\hline
+Actor hidden layers & [256, 256, 128] \\
+Critic hidden layers & [256, 256, 128] \\
+Activation & ReLU \\
+\hline
+\multicolumn{2}{|c|}{\textit{SAC Algorithm}} \\
+\hline
+Learning rate (actor/critic/$\alpha$) & $3 \times 10^{-4}$ \\
+Discount factor $\gamma$ & 0.99 \\
+Soft update rate $\tau$ & 0.005 \\
+Initial temperature $\alpha_0$ & 1.0 \\
+Target entropy & $-\dim(\mathcal{A})$ \\
+\hline
+\multicolumn{2}{|c|}{\textit{Replay Buffer}} \\
+\hline
+Buffer size & 100,000--200,000 \\
+Batch size & 512 \\
+Min buffer before training & 2,000--5,000 \\
+Priority exponent $\alpha$ & 0.6 \\
+\hline
+\multicolumn{2}{|c|}{\textit{Training}} \\
+\hline
+Parallel workers & 32 \\
+Games per batch & 32 \\
+Updates per batch & 4 \\
+\hline
+\end{tabular}
+\end{center}
+\end{table}
 
-The preferred spelling of the word ``acknowledgment'' in America is without an ``e'' after the ``g''. Avoid the stilted expression, ``One of us (R. B. G.) thanks . . .''  Instead, try ``R. B. G. thanks''. Put sponsor acknowledgments in the unnumbered footnote on the first page.
+\begin{table}[h]
+\caption{Reward Function Parameters}
+\label{tab:reward_params}
+\begin{center}
+\begin{tabular}{|l|c|c|}
+\hline
+\textbf{Component} & \textbf{Compact} & \textbf{Large} \\
+\hline
+Win reward & +100 & +1000 \\
+Loss reward & $-100$ & $-1000$ \\
+Draw penalty (default) & progress-based & progress-based \\
+Draw penalty (strict) & $-100$ & $-1000$ \\
+\hline
+Pocket own ball & $+\frac{n}{N} \times 100$ & $+\frac{n}{N} \times 100$ \\
+Pocket opponent ball & $-50$ & $-50$ \\
+\hline
+Keep turn bonus & +10 & +10 \\
+Lose turn penalty & $-5$ & $-5$ \\
+\hline
+Scratch foul & $-20$ & $-20$ \\
+Wrong ball first & $-15$ & $-15$ \\
+No rail contact & $-10$ & $-10$ \\
+Complete miss & $-25$ & $-25$ \\
+\hline
+\end{tabular}
+\end{center}
+\end{table}
 
+\begin{table}[h]
+\caption{Imitation Learning Hyperparameters}
+\label{tab:il_hyperparams}
+\begin{center}
+\begin{tabular}{|l|c|}
+\hline
+\textbf{Parameter} & \textbf{Value} \\
+\hline
+\multicolumn{2}{|c|}{\textit{Data Collection}} \\
+\hline
+Expert agent & long\_mcts \\
+MCTS simulations & 400 \\
+MCTS candidates & 64 \\
+Total samples & 1,787,130 \\
+Train/Val split & 80\%/20\% \\
+\hline
+\multicolumn{2}{|c|}{\textit{Large MLP}} \\
+\hline
+Hidden layers & [1024] $\times$ 6 \\
+Parameters & 26M \\
+\hline
+\multicolumn{2}{|c|}{\textit{Equivariant Network}} \\
+\hline
+Ball embedding dim & 64 \\
+Attention heads & 8 \\
+Set attention layers & 8 \\
+\hline
+\multicolumn{2}{|c|}{\textit{Training}} \\
+\hline
+Optimizer & AdamW \\
+Learning rate & $10^{-4}$ \\
+Weight decay & $10^{-4}$ \\
+Batch size & 512 \\
+Epochs & 100--200 \\
+LR scheduler & ReduceOnPlateau \\
+\hline
+\end{tabular}
+\end{center}
+\end{table}
 
+\subsection*{B. State and Action Space Details}
+\label{app:spaces}
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsubsection*{SAC State Encoding (64 dimensions)}
 
-References are important to the reader; therefore, each citation must be complete and correct. If at all possible, references should be commonly available publications.
+\begin{table}[h]
+\begin{center}
+\begin{tabular}{|l|c|l|}
+\hline
+\textbf{Component} & \textbf{Dims} & \textbf{Description} \\
+\hline
+Cue ball & 2 & $(x, y)$ normalized \\
+Own balls & 21 & 7 balls $\times$ 3, sorted by dist \\
+Opponent balls & 21 & 7 balls $\times$ 3, sorted by dist \\
+8-ball & 3 & $(x, y, pocketed)$ \\
+Pocket positions & 12 & 6 pockets $\times$ 2 \\
+Game info & 5 & counts, phase, turn \\
+\hline
+\textbf{Total} & \textbf{64} & \\
+\hline
+\end{tabular}
+\end{center}
+\end{table}
 
+\subsubsection*{Action Space}
 
+\textbf{Full action space} (5 dimensions):
+\begin{itemize}
+    \item $V_0 \in [0.5, 8.0]$ m/s: cue velocity
+    \item $\phi \in [0^\circ, 360^\circ)$: horizontal angle
+    \item $\theta \in [0^\circ, 90^\circ]$: vertical angle (elevation)
+    \item $a \in [-0.5, 0.5]$: horizontal spin offset
+    \item $b \in [-0.5, 0.5]$: vertical spin offset
+\end{itemize}
 
-\begin{thebibliography}{99}
-
-\bibitem{c1} G. O. Young, ``Synthetic structure of industrial plastics (Book style with paper title and editor),'' 	in Plastics, 2nd ed. vol. 3, J. Peters, Ed.  New York: McGraw-Hill, 1964, pp. 15--64.
-\bibitem{c2} W.-K. Chen, Linear Networks and Systems (Book style).	Belmont, CA: Wadsworth, 1993, pp. 123--135.
-\bibitem{c3} H. Poor, An Introduction to Signal Detection and Estimation.   New York: Springer-Verlag, 1985, ch. 4.
-\bibitem{c4} B. Smith, ``An approach to graphs of linear forms (Unpublished work style),'' unpublished.
-\bibitem{c5} E. H. Miller, ``A note on reflector arrays (Periodical styleÑAccepted for publication),'' IEEE Trans. Antennas Propagat., to be publised.
-\bibitem{c6} J. Wang, ``Fundamentals of erbium-doped fiber amplifiers arrays (Periodical styleÑSubmitted for publication),'' IEEE J. Quantum Electron., submitted for publication.
-\bibitem{c7} C. J. Kaufman, Rocky Mountain Research Lab., Boulder, CO, private communication, May 1995.
-\bibitem{c8} Y. Yorozu, M. Hirano, K. Oka, and Y. Tagawa, ``Electron spectroscopy studies on magneto-optical media and plastic substrate interfaces(Translation Journals style),'' IEEE Transl. J. Magn.Jpn., vol. 2, Aug. 1987, pp. 740--741 [Dig. 9th Annu. Conf. Magnetics Japan, 1982, p. 301].
-\bibitem{c9} M. Young, The Techincal Writers Handbook.  Mill Valley, CA: University Science, 1989.
-\bibitem{c10} J. U. Duncombe, ``Infrared navigationÑPart I: An assessment of feasibility (Periodical style),'' IEEE Trans. Electron Devices, vol. ED-11, pp. 34--39, Jan. 1959.
-\bibitem{c11} S. Chen, B. Mulgrew, and P. M. Grant, ``A clustering technique for digital communications channel equalization using radial basis function networks,'' IEEE Trans. Neural Networks, vol. 4, pp. 570--578, July 1993.
-\bibitem{c12} R. W. Lucky, ``Automatic equalization for digital communication,'' Bell Syst. Tech. J., vol. 44, no. 4, pp. 547--588, Apr. 1965.
-\bibitem{c13} S. P. Bingulac, ``On the compatibility of adaptive controllers (Published Conference Proceedings style),'' in Proc. 4th Annu. Allerton Conf. Circuits and Systems Theory, New York, 1994, pp. 8--16.
-\bibitem{c14} G. R. Faulhaber, ``Design of service systems with priority reservation,'' in Conf. Rec. 1995 IEEE Int. Conf. Communications, pp. 3--8.
-\bibitem{c15} W. D. Doyle, ``Magnetization reversal in films with biaxial anisotropy,'' in 1987 Proc. INTERMAG Conf., pp. 2.2-1--2.2-6.
-\bibitem{c16} G. W. Juette and L. E. Zeffanella, ``Radio noise currents n short sections on bundle conductors (Presented Conference Paper style),'' presented at the IEEE Summer power Meeting, Dallas, TX, June 22--27, 1990, Paper 90 SM 690-0 PWRS.
-\bibitem{c17} J. G. Kreifeldt, ``An analysis of surface-detected EMG as an amplitude-modulated noise,'' presented at the 1989 Int. Conf. Medicine and Biological Engineering, Chicago, IL.
-\bibitem{c18} J. Williams, ``Narrow-band analyzer (Thesis or Dissertation style),'' Ph.D. dissertation, Dept. Elect. Eng., Harvard Univ., Cambridge, MA, 1993. 
-\bibitem{c19} N. Kawasaki, ``Parametric study of thermal and chemical nonequilibrium nozzle flow,'' M.S. thesis, Dept. Electron. Eng., Osaka Univ., Osaka, Japan, 1993.
-\bibitem{c20} J. P. Wilkinson, ``Nonlinear resonant circuit devices (Patent style),'' U.S. Patent 3 624 12, July 16, 1990. 
-
-
-
-
-
-
-\end{thebibliography}
-
-
-
+\textbf{Simplified action space} (2 dimensions, used in experiments):
+\begin{itemize}
+    \item $V_0 \in [1.0, 6.0]$ m/s
+    \item $\phi \in [0^\circ, 360^\circ)$
+\end{itemize}
+Fixed: $\theta = 0^\circ$, $a = b = 0$ (no spin).
 
 \end{document}
