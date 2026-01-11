@@ -198,7 +198,7 @@ Given that BasicAgent was too strong, I redesigned the training approach around 
 
 Instead of varying opponent difficulty, I varied game complexity by controlling the number of balls. The \textbf{4-Ball Stage} represents the simplest possible game: one cue ball, one own ball, one opponent ball, and the 8-ball. This configuration provides the maximum probability of successful pocketing through random exploration, while still requiring the agent to learn the fundamental rule that the 8-ball must be pocketed last. The \textbf{6-Ball Stage} introduces two own balls and two opponent balls, plus cue and 8-ball, adding more complex decision-making about shot selection. The eventual goal was to train on the complete 16-ball game.
 
-For consistency in state representation, balls not present in simplified scenarios are marked as ``already pocketed'' in the state encoding, maintaining the 53-dimensional input throughout all stages.
+For consistency in state representation, balls not present in simplified scenarios are marked as ``already pocketed'' in the state encoding, maintaining the 64-dimensional input throughout all stages.
 
 \subsubsection{Discovery of the Degenerate Strategy}
 
@@ -679,7 +679,7 @@ LR scheduler & ReduceOnPlateau \\
 \subsection*{B. State and Action Space Details}
 \label{app:spaces}
 
-\subsubsection*{SAC State Encoding (53 dimensions)}
+\subsubsection*{SAC State Encoding (64 dimensions)}
 
 \begin{table}[h]
 \begin{center}
@@ -687,13 +687,14 @@ LR scheduler & ReduceOnPlateau \\
 \hline
 \textbf{Component} & \textbf{Dims} & \textbf{Description} \\
 \hline
-Cue ball & 3 & $(x, y, pocketed)$ \\
+Cue ball & 2 & $(x, y)$ normalized \\
 Own balls & 21 & 7 balls $\times$ 3, sorted by dist \\
 Opponent balls & 21 & 7 balls $\times$ 3, sorted by dist \\
 8-ball & 3 & $(x, y, pocketed)$ \\
+Pocket positions & 12 & 6 pockets $\times$ 2 \\
 Game info & 5 & counts, phase, turn \\
 \hline
-\textbf{Total} & \textbf{53} & \\
+\textbf{Total} & \textbf{64} & \\
 \hline
 \end{tabular}
 \end{center}
