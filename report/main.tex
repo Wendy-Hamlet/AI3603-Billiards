@@ -477,6 +477,8 @@ The results demonstrate a clear hierarchy among approaches, with MCTS-based agen
 
 The imitation learning agent achieved only 35.5\% win rate against BasicAgent, substantially lower than the 96.9\% achieved by the MCTS expert it was trained to imitate. This dramatic performance gap directly illustrates the multi-modal action problem: the learned policy predicts ``averaged'' actions that correspond to neither of the expert's valid shot choices, resulting in frequent misses.
 
+Among MCTS variants, \textbf{long\_opening} represents the final optimized solution, incorporating an opening safety strategy for unbroken racks. This variant achieves 96.2\% win rate against BasicAgent and 79.5\% against BasicAgentPro, demonstrating that strategic opening play provides additional robustness while maintaining strong overall performance. The performance is comparable to the base \textbf{long\_mcts} (96.9\% vs Basic, 80.6\% vs Pro), with a slight trade-off that prioritizes safe opening play.
+
 MCTS succeeds where learning methods fail for several fundamental reasons. First, MCTS provides \textbf{explicit look-ahead evaluation}: by simulating action consequences before execution, MCTS avoids the 18--25\% ``self-defeat'' rate observed in greedy baselines (Section II-B). The agent can reject shots that risk pocketing the 8-ball prematurely or scratching, something that RL struggled to learn implicitly.
 
 Second, MCTS requires \textbf{no training phase}: it works directly from the physics engine without collecting millions of samples or tuning hyperparameters. This is a significant practical advantage when a fast, accurate simulator is available.
