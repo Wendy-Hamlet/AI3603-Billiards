@@ -530,7 +530,7 @@ I was responsible for the learning-based approaches and infrastructure developme
 
 \textbf{Opponent robustness analysis}: I designed and executed experiments using a RandomAgent to probe the robustness of baseline opponents. This analysis revealed that BasicAgent loses 25\% and BasicAgentPro loses 18\% of games through self-defeat (premature 8-ball pocketing, scratches), even against a nearly-passive opponent. This insight motivated the exploration of look-ahead methods.
 
-\textbf{Complete SAC reinforcement learning framework}: I developed a full Soft Actor-Critic implementation adapted for billiards, including the 53-dimensional state encoding, multi-component reward function, and curriculum learning infrastructure. The framework supports parallel training across multiple CPU workers, with careful handling of physics engine compatibility requirements.
+\textbf{Complete SAC reinforcement learning framework}: I developed a full Soft Actor-Critic implementation adapted for billiards, including the 64-dimensional state encoding, multi-component reward function, and curriculum learning infrastructure. The framework supports parallel training across multiple CPU workers, with careful handling of physics engine compatibility requirements.
 
 \textbf{Controlled RL experiments}: I designed and executed three systematic experiments comparing reward configurations (large vs compact terminal rewards, progressive vs strict draw penalties). These experiments demonstrated that reward structure matters more than magnitude and identified the degenerate equilibrium phenomenon in self-play training.
 
